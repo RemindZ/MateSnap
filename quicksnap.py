@@ -74,6 +74,18 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             for obj in ignored_objs:
                 obj.hide_set(True)
 
+        self.lock_key_active = bool(
+            getattr(self.settings, "lock_and_key_mode", False)
+        )
+        if self.lock_key_active:
+            if not self.object_mode or self.no_selection:
+                self.report(
+                    {'WARNING'},
+                    "Lock and key requires a selected key in Object mode",
+                )
+                return False
+            return self.initialize_lock_key(context, region)
+
         # Create SnapData objects that will store all the vertex/point info (World space, view space, and kdtree to
         # search the closest point)
         self.snapdata_source = SnapData(context, region, self.settings, self.selection_objects,
@@ -121,6 +133,37 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.last_event = None
         self.clicktime = 0
         context.area.header_text_set(f"QuickSnap: Pick a vertex/point from the selection to start move-snapping")
+        self.detect_hotkey()
+        return True
+
+    def initialize_lock_key(self, context, region):
+        region3d = context.space_data.region_3d
+        self.camera_position = region3d.view_matrix.inverted().translation
+        self.perspective_matrix = region3d.perspective_matrix.copy()
+        self.perspective_matrix_inverse = self.perspective_matrix.inverted()
+        self.target_object_display_backup = {}
+        self.local_wire_objects = set()
+        self.local_wire_data = {}
+        self._heavy_cache = {}
+        self._corner_cache = {}
+        self.selection_hidden = False
+        self.snap_paused = False
+        self.no_selection_target = None
+        self.ignore_modifiers = self.settings.ignore_modifiers
+        self.current_state = State.IDLE
+        self.lock_key_source_hit = None
+        self.lock_key_source_preview = None
+        self.lock_key_target_preview = None
+        self.backup_data(context)
+        self.lock_key_original_matrices = {
+            name: matrix.copy()
+            for name, matrix in self.backup_object_positions.items()
+        }
+        self.clickdrag = False
+        self.last_event = None
+        self.clicktime = 0
+        self.update_lock_key_preview(context, region)
+        self.update_header(context)
         self.detect_hotkey()
         return True
 
@@ -487,6 +530,114 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 self.set_selection_hidden(hover_object != "" or self.snap_paused)
 
 
+    def raycast_lock_key_surface(self, context, selected_only):
+        depsgraph = context.evaluated_depsgraph_get()
+        selected = set(self.selection_objects)
+        candidates = (
+            bpy.data.objects.get(name) for name in self.selection_objects
+        ) if selected_only else context.visible_objects
+        closest = None
+        for obj in candidates:
+            if (
+                obj is None or obj.type != 'MESH' or not obj.visible_get()
+                or (not selected_only and obj.name in selected)
+            ):
+                continue
+            fit_obj = (
+                obj if self.settings.ignore_modifiers
+                else obj.evaluated_get(depsgraph)
+            )
+            inverse = fit_obj.matrix_world.inverted_safe()
+            origin = inverse @ self.mouse_position_world
+            direction = inverse.to_3x3() @ self.mouse_vector
+            if direction.length_squared == 0.0:
+                continue
+            direction.normalize()
+            hit, location, _, face_index = fit_obj.ray_cast(origin, direction)
+            if not hit or face_index < 0:
+                continue
+            world_location = fit_obj.matrix_world @ location
+            distance = (world_location - self.mouse_position_world).length
+            if closest is None or distance < closest[0]:
+                closest = (
+                    distance,
+                    {
+                        'object_name': obj.name,
+                        'face_index': int(face_index),
+                        'location': world_location.copy(),
+                    },
+                )
+        return None if closest is None else closest[1]
+
+    def update_lock_key_preview(self, context, region):
+        region3d = context.space_data.region_3d
+        self.camera_position = region3d.view_matrix.inverted().translation
+        if region3d.view_perspective == 'CAMERA' and not region3d.is_perspective:
+            self.mouse_position_world = view3d_utils.region_2d_to_location_3d(
+                region, region.data, self.mouse_position,
+                context.space_data.camera.location,
+            )
+        else:
+            self.mouse_position_world = view3d_utils.region_2d_to_origin_3d(
+                region, region.data, self.mouse_position
+            )
+        self.mouse_vector = view3d_utils.region_2d_to_vector_3d(
+            region, region.data, self.mouse_position
+        )
+        hit = self.raycast_lock_key_surface(
+            context, selected_only=self.current_state == State.IDLE
+        )
+        if self.current_state == State.IDLE:
+            self.lock_key_source_preview = hit
+        else:
+            self.lock_key_target_preview = hit
+        context.window.cursor_set("CROSSHAIR")
+
+    def record_lock_key_source(self, hit):
+        self.lock_key_source_hit = {
+            'object_name': hit['object_name'],
+            'face_index': int(hit['face_index']),
+            'location': Vector(hit['location']).copy(),
+        }
+        self.lock_key_target_preview = None
+
+    def apply_world_delta_to_selection(self, delta):
+        objects = [
+            bpy.data.objects.get(name) for name in self.selection_objects
+        ]
+        roots = quicksnap_utils.keep_only_parents(
+            [obj for obj in objects if obj is not None]
+        )
+        for obj in roots:
+            obj.matrix_world = delta @ obj.matrix_world
+
+    def finish_lock_key(self, context, hit):
+        source = self.lock_key_source_hit
+        if source is None or hit is None:
+            return False
+        delta = quicksnap_utils.compute_lock_key_transform(
+            context,
+            self.settings,
+            source['object_name'],
+            source['face_index'],
+            source['location'],
+            hit['object_name'],
+            hit['face_index'],
+            hit['location'],
+            allow_rotation=getattr(
+                self.settings, "lock_and_key_rotate", False
+            ),
+        )
+        if delta is None:
+            self.report(
+                {'WARNING'},
+                "Lock and key: no safe connector match found",
+            )
+            return False
+        self.apply_world_delta_to_selection(delta)
+        return True
+
+
     def apply(self, context, region, use_auto_merge=False):
         """
         Apply operator modifications: Translate objects or vertices/points from source point to target point.
@@ -563,6 +714,11 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.perf_wire_ms = 0.0
         self.selection_hidden = False
         self.snap_paused = False
+        self.lock_key_active = False
+        self.lock_key_source_hit = None
+        self.lock_key_source_preview = None
+        self.lock_key_target_preview = None
+        self.lock_key_original_matrices = {}
         self.source_object = ""
         self.source_element_index = -1
         self.source_snap_type = ""
@@ -635,6 +791,61 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.perspective_matrix_inverse = self.perspective_matrix.inverted()
         self.init_snap_data(context, region, self.current_state == State.IDLE, True)
 
+    def modal_lock_key(self, context, event, region):
+        context.area.tag_redraw()
+        if (
+            not self.menu_open
+            and event.value == 'PRESS'
+            and event.type == self.hotkey_type
+            and event.shift == self.hotkey_shift
+            and event.ctrl == self.hotkey_ctrl
+            and event.alt == self.hotkey_alt
+        ):
+            self.menu_open = True
+            bpy.ops.wm.call_menu_pie(name="VIEW3D_MT_PIE_quicksnap")
+            return {'RUNNING_MODAL'}
+        if self.menu_open:
+            self.menu_open = False
+
+        if (
+            event.type in {'RIGHTMOUSE', 'ESC'}
+            and event.value == 'PRESS'
+        ):
+            self.terminate(context, revert=True)
+            return {'CANCELLED'}
+
+        if event.type == 'MOUSEMOVE':
+            self.update_mouse_position(context, event)
+            self.update_lock_key_preview(context, region)
+            self.update_header(context)
+        elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            self.update_mouse_position(context, event)
+            self.update_lock_key_preview(context, region)
+            if (
+                self.current_state == State.IDLE
+                and self.lock_key_source_preview is not None
+            ):
+                self.record_lock_key_source(self.lock_key_source_preview)
+                self.current_state = State.SOURCE_PICKED
+                self.update_lock_key_preview(context, region)
+                self.update_header(context)
+            elif (
+                self.current_state == State.SOURCE_PICKED
+                and self.lock_key_target_preview is not None
+                and self.finish_lock_key(
+                    context, self.lock_key_target_preview
+                )
+            ):
+                self.terminate(context)
+                return {'FINISHED'}
+
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+            self.update_mouse_position(context, event)
+            return {'PASS_THROUGH'}
+        if event.type != 'TIMER':
+            self.last_event = event.type
+        return {'RUNNING_MODAL'}
+
     def modal(self, context, event):
 
         # Get 'WINDOW' region of the current context, useful when the context region is a child UI region of the window
@@ -642,6 +853,15 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         for area_region in context.area.regions:
             if area_region.type == 'WINDOW':
                 region = area_region
+
+        lock_key_mode = bool(
+            getattr(self.settings, "lock_and_key_mode", False)
+        )
+        if lock_key_mode != self.lock_key_active:
+            self.terminate(context, revert=True)
+            return {'CANCELLED'}
+        if self.lock_key_active:
+            return self.modal_lock_key(context, event, region)
 
         if event.type not in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE',
                                                                    'TIMER'}:
@@ -900,7 +1120,8 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='EDIT')
             bpy.context.window.cursor_set("CROSSHAIR")
         quicksnap_render.remove_draw_handlers()
-        self.snapdata_target.is_enabled = False
+        if self.snapdata_target is not None:
+            self.snapdata_target.is_enabled = False
         context.window_manager.event_timer_remove(self._timer)
 
         # Revert mode and selection
@@ -928,6 +1149,9 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.local_wire_data = {}
         self._heavy_cache = {}
         self._corner_cache = {}
+        self.lock_key_source_hit = None
+        self.lock_key_source_preview = None
+        self.lock_key_target_preview = None
         try:
             save_settings()  # keep the settings backup fresh even if Blender never unregisters
         except Exception:
@@ -937,6 +1161,16 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.mouse_position = (event.mouse_region_x, event.mouse_region_y)
 
     def update_header(self, context):
+        if self.lock_key_active:
+            if self.current_state == State.IDLE:
+                context.area.header_text_set(
+                    "Lock and key: click the connector on the selected key"
+                )
+            else:
+                context.area.header_text_set(
+                    "Lock and key: click inside the target lock"
+                )
+            return
         ignore_modifiers_msg = ""
         axis_msg = ""
         snapping_msg = f"Use (Shift+)X/Y/Z to constraint to the world/local axis or plane. Use O to snap to object " \

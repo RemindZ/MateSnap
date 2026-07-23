@@ -1,7 +1,9 @@
 import importlib.util
 import math
 from pathlib import Path
+import sys
 from types import SimpleNamespace
+import types
 
 import bpy
 from mathutils import Euler, Vector
@@ -14,6 +16,21 @@ SPEC = importlib.util.spec_from_file_location(
 )
 quicksnap_utils = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(quicksnap_utils)
+
+PACKAGE_NAME = "quicksnap_regression_package"
+PACKAGE = types.ModuleType(PACKAGE_NAME)
+PACKAGE.__path__ = [str(ROOT)]
+sys.modules[PACKAGE_NAME] = PACKAGE
+RENDER_STUB = types.ModuleType(PACKAGE_NAME + ".quicksnap_render")
+RENDER_STUB.add_draw_handlers = lambda *args, **kwargs: None
+RENDER_STUB.remove_draw_handlers = lambda *args, **kwargs: None
+sys.modules[RENDER_STUB.__name__] = RENDER_STUB
+OPERATOR_SPEC = importlib.util.spec_from_file_location(
+    PACKAGE_NAME + ".quicksnap", ROOT / "quicksnap.py"
+)
+quicksnap = importlib.util.module_from_spec(OPERATOR_SPEC)
+sys.modules[OPERATOR_SPEC.name] = quicksnap
+OPERATOR_SPEC.loader.exec_module(quicksnap)
 
 
 def clear_scene():
@@ -262,6 +279,71 @@ def assert_smallest_equivalent_rotation():
         raise AssertionError(f"expected the smallest 10 degree rotation, got {math.degrees(angle)}")
 
 
+def assert_atomic_hierarchy_transform():
+    clear_scene()
+    parent, _, source_hit, lock, lock_face, lock_hit = make_straight_key_lock()
+    child = make_mesh(
+        "KeyChild",
+        [(0, 0, 0), (0.1, 0, 0), (0, 0.1, 0)],
+        [(0, 1, 2)],
+    )
+    child.matrix_world.translation = (2.0, -1.0, 0.5)
+    child.parent = parent
+    child.matrix_parent_inverse = parent.matrix_world.inverted()
+    parent.select_set(True)
+    child.select_set(True)
+    before_parent = parent.matrix_world.copy()
+    before_child = child.matrix_world.copy()
+    before_child_basis = child.matrix_basis.copy()
+
+    operator = SimpleNamespace(report=lambda *args, **kwargs: None)
+    for method_name in (
+        "record_lock_key_source",
+        "apply_world_delta_to_selection",
+        "finish_lock_key",
+    ):
+        method = getattr(quicksnap.QuickVertexSnapOperator, method_name)
+        setattr(operator, method_name, types.MethodType(method, operator))
+    operator.selection_objects = [parent.name, child.name]
+    operator.record_lock_key_source({
+        'object_name': parent.name,
+        'face_index': 5,
+        'location': source_hit,
+    })
+    if parent.matrix_world != before_parent or child.matrix_world != before_child:
+        raise AssertionError("recording the source surface moved the hierarchy")
+
+    delta = quicksnap_utils.mathutils.Matrix.Translation((0.25, -0.5, 0.75))
+    operator.apply_world_delta_to_selection(delta)
+    bpy.context.view_layer.update()
+    if parent.matrix_world != delta @ before_parent:
+        raise AssertionError("selected root did not receive the world delta")
+    if child.matrix_world != delta @ before_child:
+        raise AssertionError("selected child did not inherit the root delta exactly once")
+    if child.matrix_basis != before_child_basis:
+        raise AssertionError("selected child was transformed directly as well as through its parent")
+
+    parent.matrix_world = before_parent
+    child.matrix_world = before_child
+    operator.settings = SimpleNamespace(
+        ignore_modifiers=True, lock_and_key_rotate=False
+    )
+    original_solver = quicksnap.quicksnap_utils.compute_lock_key_transform
+    quicksnap.quicksnap_utils.compute_lock_key_transform = lambda *args, **kwargs: None
+    try:
+        result = operator.finish_lock_key(bpy.context, {
+            'object_name': lock.name,
+            'face_index': lock_face,
+            'location': lock_hit,
+        })
+    finally:
+        quicksnap.quicksnap_utils.compute_lock_key_transform = original_solver
+    if result:
+        raise AssertionError("solver failure was reported as a successful mate")
+    if parent.matrix_world != before_parent or child.matrix_world != before_child:
+        raise AssertionError("solver failure changed the selected hierarchy")
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -288,6 +370,8 @@ def main():
     ) is None
     assert_smallest_equivalent_rotation()
     print("optional rotation: PASS")
+    assert_atomic_hierarchy_transform()
+    print("atomic hierarchy transform: PASS")
     print("lock_key_regression: PASS")
 
 
