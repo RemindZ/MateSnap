@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased - QuickSnap Neo
+
+### Added
+- Lock and key mode provides a no-drag, two-surface-click workflow for
+  selected figurine connectors. The first click records the key without
+  moving it; the second applies one validated transform into the lock.
+- Translation-only centering is the default and preserves the insertion depth
+  defined by the two clicks. An optional setting also aligns a uniquely
+  constrained connector rotation.
+- Clean rectangular, slot, and depth-tapered trapezoidal connectors are
+  supported. Round, organic, stale, incompatible, or ambiguous geometry fails
+  closed without changing the selected hierarchy.
+
 ## 1.5.13
 
 ### Changed
