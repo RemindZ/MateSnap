@@ -871,6 +871,12 @@ def compute_lock_key_transform(
     ):
         logger.debug("Lock and key skipped: source or target mesh is unavailable")
         return None
+    if (
+        abs(source_obj.matrix_world.to_3x3().determinant()) <= 1e-12
+        or abs(target_obj.matrix_world.to_3x3().determinant()) <= 1e-12
+    ):
+        logger.debug("Lock and key skipped: source or target transform is singular")
+        return None
     depsgraph = context.evaluated_depsgraph_get()
     ignore_modifiers = getattr(settings, 'ignore_modifiers', False)
     source_fit = source_obj if ignore_modifiers else source_obj.evaluated_get(depsgraph)

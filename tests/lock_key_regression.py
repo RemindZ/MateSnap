@@ -162,6 +162,14 @@ def make_single_direction_pair():
     return source, 0, source_hit, target, 0, target_hit
 
 
+def make_singular_key_lock():
+    key, key_face, _, lock, lock_face, lock_hit = make_straight_key_lock()
+    key.scale.x = 0.0
+    bpy.context.view_layer.update()
+    key_hit = key.matrix_world @ Vector((-0.5, 0.0, -0.3))
+    return key, key_face, key_hit, lock, lock_face, lock_hit
+
+
 def assert_matrix_finite(matrix):
     values = np.array(matrix, dtype=np.float64)
     if values.shape != (4, 4) or not np.isfinite(values).all():
@@ -299,6 +307,7 @@ def assert_atomic_hierarchy_transform():
 
     operator = SimpleNamespace(report=lambda *args, **kwargs: None)
     for method_name in (
+        "lock_key_geometry_signature",
         "record_lock_key_source",
         "apply_world_delta_to_selection",
         "finish_lock_key",
@@ -343,6 +352,85 @@ def assert_atomic_hierarchy_transform():
         raise AssertionError("solver failure was reported as a successful mate")
     if parent.matrix_world != before_parent or child.matrix_world != before_child:
         raise AssertionError("solver failure changed the selected hierarchy")
+
+    quicksnap.quicksnap_utils.compute_lock_key_transform = (
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bad mesh"))
+    )
+    logger_disabled = quicksnap.logger.disabled
+    quicksnap.logger.disabled = True
+    try:
+        result = operator.finish_lock_key(bpy.context, {
+            'object_name': lock.name,
+            'face_index': lock_face,
+            'location': lock_hit,
+        })
+    finally:
+        quicksnap.quicksnap_utils.compute_lock_key_transform = original_solver
+        quicksnap.logger.disabled = logger_disabled
+    if result or parent.matrix_world != before_parent:
+        raise AssertionError("solver exception did not fail closed")
+
+
+def assert_changed_source_face_rejected():
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_straight_key_lock()
+    operator = SimpleNamespace(
+        report=lambda *args, **kwargs: None,
+        settings=SimpleNamespace(
+            ignore_modifiers=True, lock_and_key_rotate=False
+        ),
+        selection_objects=[key.name],
+    )
+    for method_name in (
+        "lock_key_geometry_signature",
+        "record_lock_key_source",
+        "apply_world_delta_to_selection",
+        "finish_lock_key",
+    ):
+        method = getattr(quicksnap.QuickVertexSnapOperator, method_name)
+        setattr(operator, method_name, types.MethodType(method, operator))
+    signature = operator.lock_key_geometry_signature(
+        bpy.context, key.name, key_face
+    )
+    operator.record_lock_key_source({
+        'object_name': key.name,
+        'face_index': key_face,
+        'location': key_hit,
+        'geometry_signature': signature,
+    })
+    before = key.matrix_world.copy()
+    key.data.vertices[1].co.x += 0.2
+    key.data.update()
+    original_solver = quicksnap.quicksnap_utils.compute_lock_key_transform
+    quicksnap.quicksnap_utils.compute_lock_key_transform = (
+        lambda *args, **kwargs:
+        quicksnap_utils.mathutils.Matrix.Translation((1, 0, 0))
+    )
+    try:
+        result = operator.finish_lock_key(bpy.context, {
+            'object_name': lock.name,
+            'face_index': lock_face,
+            'location': lock_hit,
+        })
+    finally:
+        quicksnap.quicksnap_utils.compute_lock_key_transform = original_solver
+    if result or key.matrix_world != before:
+        raise AssertionError("changed in-range source face did not fail closed")
+
+
+def assert_mode_switch_reinitializes_in_place():
+    calls = []
+    operator = SimpleNamespace(
+        set_selection_hidden=lambda hidden: calls.append(("hidden", hidden)),
+        revert_data=lambda context, apply=False: calls.append(("revert", apply)),
+        set_object_display=lambda *args: calls.append(("display", args)),
+        initialize=lambda context: calls.append(("initialize", None)) or True,
+        update_header=lambda context: calls.append(("header", None)),
+    )
+    method = quicksnap.QuickVertexSnapOperator.switch_lock_key_mode
+    result = method(operator, None)
+    if not result or ("revert", True) not in calls or ("initialize", None) not in calls:
+        raise AssertionError("pie workflow change did not reset and reinitialize in place")
 
 
 def assert_lock_key_settings_persist():
@@ -412,10 +500,15 @@ def main():
         ),
         allow_rotation=True,
     ) is None
+    assert compute_case(make_singular_key_lock) is None
     assert_smallest_equivalent_rotation()
     print("optional rotation: PASS")
     assert_atomic_hierarchy_transform()
     print("atomic hierarchy transform: PASS")
+    assert_changed_source_face_rejected()
+    print("changed source face: PASS")
+    assert_mode_switch_reinitializes_in_place()
+    print("mode switch: PASS")
     assert_lock_key_settings_persist()
     print("Lock and key settings: PASS")
     print("lock_key_regression: PASS")

@@ -70,7 +70,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         if context.space_data.local_view is not None:
             all_scene_objects = [obj for obj in context.view_layer.objects if not obj.hide_get()]
             ignored_objs = set([obj for obj in all_scene_objects if obj not in context.visible_objects])
-            self.ignored_obj_names = set([obj.name for obj in ignored_objs])
+            self.ignored_obj_names.update(obj.name for obj in ignored_objs)
             for obj in ignored_objs:
                 obj.hide_set(True)
 
@@ -530,6 +530,67 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 self.set_selection_hidden(hover_object != "" or self.snap_paused)
 
 
+    def lock_key_geometry_signature(self, context, object_name, face_index):
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or obj.type != 'MESH':
+            return None
+        depsgraph = context.evaluated_depsgraph_get()
+        fit_obj = (
+            obj if self.settings.ignore_modifiers
+            else obj.evaluated_get(depsgraph)
+        )
+        mesh = fit_obj.data
+        if face_index < 0 or face_index >= len(mesh.polygons):
+            return None
+        try:
+            mesh_data = quicksnap_utils._mesh_fit_data(fit_obj)
+            seeds = quicksnap_utils._seed_polygons(
+                mesh_data, 'FACES', face_index
+            )
+            patches = quicksnap_utils._candidate_patches(mesh_data, seeds)
+        except Exception:
+            return None
+        if not patches:
+            return None
+        polygon_indices = sorted(set().union(
+            *(patch['polygons'] for patch in patches)
+        ))
+        neighborhood = []
+        for polygon_index in polygon_indices:
+            start = int(mesh_data['loop_starts'][polygon_index])
+            total = int(mesh_data['loop_totals'][polygon_index])
+            vertex_indices = mesh_data['loop_vertices'][start:start + total]
+            neighborhood.append((
+                int(polygon_index),
+                tuple(
+                    (
+                        int(vertex_index),
+                        tuple(
+                            round(float(value), 9)
+                            for value in mesh_data['vertices'][vertex_index]
+                        ),
+                    )
+                    for vertex_index in vertex_indices
+                ),
+                tuple(
+                    round(float(value), 9)
+                    for value in mesh_data['polygon_normals'][polygon_index]
+                ),
+            ))
+        matrix = tuple(
+            round(float(value), 12)
+            for row in fit_obj.matrix_world
+            for value in row
+        )
+        return (
+            len(mesh.vertices),
+            len(mesh.edges),
+            len(mesh.polygons),
+            len(mesh.loops),
+            tuple(neighborhood),
+            matrix,
+        )
+
     def raycast_lock_key_surface(self, context, selected_only):
         depsgraph = context.evaluated_depsgraph_get()
         selected = set(self.selection_objects)
@@ -593,11 +654,17 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             self.lock_key_target_preview = hit
         context.window.cursor_set("CROSSHAIR")
 
-    def record_lock_key_source(self, hit):
+    def record_lock_key_source(self, hit, context=None):
+        signature = hit.get('geometry_signature')
+        if signature is None and context is not None:
+            signature = self.lock_key_geometry_signature(
+                context, hit['object_name'], int(hit['face_index'])
+            )
         self.lock_key_source_hit = {
             'object_name': hit['object_name'],
             'face_index': int(hit['face_index']),
             'location': Vector(hit['location']).copy(),
+            'geometry_signature': signature,
         }
         self.lock_key_target_preview = None
 
@@ -615,19 +682,35 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         source = self.lock_key_source_hit
         if source is None or hit is None:
             return False
-        delta = quicksnap_utils.compute_lock_key_transform(
-            context,
-            self.settings,
-            source['object_name'],
-            source['face_index'],
-            source['location'],
-            hit['object_name'],
-            hit['face_index'],
-            hit['location'],
-            allow_rotation=getattr(
-                self.settings, "lock_and_key_rotate", False
-            ),
+        current_signature = self.lock_key_geometry_signature(
+            context, source['object_name'], source['face_index']
         )
+        if (
+            source.get('geometry_signature') is not None
+            and current_signature != source['geometry_signature']
+        ):
+            self.report(
+                {'WARNING'},
+                "Lock and key: source connector changed; pick it again",
+            )
+            return False
+        try:
+            delta = quicksnap_utils.compute_lock_key_transform(
+                context,
+                self.settings,
+                source['object_name'],
+                source['face_index'],
+                source['location'],
+                hit['object_name'],
+                hit['face_index'],
+                hit['location'],
+                allow_rotation=getattr(
+                    self.settings, "lock_and_key_rotate", False
+                ),
+            )
+        except Exception as error:
+            logger.warning(f"Lock and key skipped: {error}")
+            delta = None
         if delta is None:
             self.report(
                 {'WARNING'},
@@ -825,7 +908,9 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 self.current_state == State.IDLE
                 and self.lock_key_source_preview is not None
             ):
-                self.record_lock_key_source(self.lock_key_source_preview)
+                self.record_lock_key_source(
+                    self.lock_key_source_preview, context
+                )
                 self.current_state = State.SOURCE_PICKED
                 self.update_lock_key_preview(context, region)
                 self.update_header(context)
@@ -846,6 +931,20 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             self.last_event = event.type
         return {'RUNNING_MODAL'}
 
+    def switch_lock_key_mode(self, context):
+        self.set_selection_hidden(False)
+        self.revert_data(context, apply=True)
+        self.set_object_display("", "")
+        snapdata_target = getattr(self, "snapdata_target", None)
+        if snapdata_target is not None:
+            snapdata_target.is_enabled = False
+        self.snapdata_source = None
+        self.snapdata_target = None
+        if not self.initialize(context):
+            return False
+        self.update_header(context)
+        return True
+
     def modal(self, context, event):
 
         # Get 'WINDOW' region of the current context, useful when the context region is a child UI region of the window
@@ -858,8 +957,10 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             getattr(self.settings, "lock_and_key_mode", False)
         )
         if lock_key_mode != self.lock_key_active:
-            self.terminate(context, revert=True)
-            return {'CANCELLED'}
+            if not self.switch_lock_key_mode(context):
+                self.terminate(context, revert=True)
+                return {'CANCELLED'}
+            return {'RUNNING_MODAL'}
         if self.lock_key_active:
             return self.modal_lock_key(context, event, region)
 
