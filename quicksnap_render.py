@@ -572,6 +572,8 @@ def draw_callback_2d(self, context):
     except ReferenceError:
         remove_draw_handlers()  # orphaned handler: unregister so it stops firing
         return
+    if getattr(self, "lock_key_active", False):
+        return
     if self.settings.log_level == 2:
         draw_perf_hud(self, context)
     square_width=self.settings.selection_square_size
@@ -728,6 +730,22 @@ def draw_callback_3d(self, context):
         self.current_state  # a freed operator raises ReferenceError on any attribute access
     except ReferenceError:
         remove_draw_handlers()  # orphaned handler: unregister so it stops firing
+        return
+    if getattr(self, "lock_key_active", False):
+        if self.lock_key_source_hit is not None:
+            draw_points_3d(
+                [self.lock_key_source_hit['location']],
+                color=(1, 0, 0, 1),
+                point_width=8,
+                depth_test=False,
+            )
+        if self.lock_key_target_preview is not None:
+            draw_points_3d(
+                [self.lock_key_target_preview['location']],
+                color=(1, 0.5, 0, 1),
+                point_width=5,
+                depth_test=False,
+            )
         return
     draw_snap_axis(self, context)
     # Cursor-local wireframe for heavy objects (instead of native show_wire).

@@ -1393,6 +1393,17 @@ class QuickVertexSnapPreference(bpy.types.AddonPreferences):
                     " only. Ambiguous geometry and axis-constrained snaps are skipped",
         default=True)
 
+    lock_and_key_mode: bpy.props.BoolProperty(
+        name="Lock and key",
+        description="Pick a connector on the selected key, then its matching"
+                    " lock, and apply one centered transform",
+        default=False)
+    lock_and_key_rotate: bpy.props.BoolProperty(
+        name="Rotate key to match lock",
+        description="Also align compatible connector wall directions."
+                    " Ambiguous or underconstrained rotation is rejected",
+        default=False)
+
     snap_source_type: bpy.props.EnumProperty(
         name="Snap From",
         items=[
@@ -1479,6 +1490,11 @@ class QuickVertexSnapPreference(bpy.types.AddonPreferences):
         fit_box = col.box().column()
         fit_box.label(text="Precision fit:")
         fit_box.prop(self, "precision_fit")
+        lock_box = col.box().column()
+        lock_box.label(text="Lock and key:")
+        lock_box.prop(self, "lock_and_key_mode")
+        if self.lock_and_key_mode:
+            lock_box.prop(self, "lock_and_key_rotate")
         col.prop(self, "snap_objects_origin")
         col.prop(self, "draw_rubberband")
         col.prop(self, "hide_selection_over_target")
@@ -1557,16 +1573,39 @@ class VIEW3D_MT_PIE_quicksnap(bpy.types.Menu):
 
         pie = layout.menu_pie()
         source_column = pie.column()
+        source_column.enabled = not settings.lock_and_key_mode
         source_column.label(text="Snap From:")
         source_column.prop(settings, "snap_source_type", expand=True)
 
         # operator_enum will just spread all available options
         # for the type enum of the operator on the pie
         target_column = pie.column()
+        target_column.enabled = not settings.lock_and_key_mode
         target_column.label(text="Snap To:")
         target_column.prop(settings, "snap_target_type", expand=True)
-        pie.operator("quicksnap.open_settings")
+        lock_column = pie.column()
+        lock_box = lock_column.box()
+        lock_box.operator(
+            "quicksnap.toggle_lock_key",
+            text="Lock and key",
+            depress=settings.lock_and_key_mode,
+        )
         pie.prop(settings, "ignore_modifiers")
+        pie.operator("quicksnap.open_settings")
+
+
+class QUICKSNAP_OT_toggle_lock_key(bpy.types.Operator):
+    bl_idname = "quicksnap.toggle_lock_key"
+    bl_label = "Lock and key"
+    bl_description = "Use two surface clicks for both source and target"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    def execute(self, context):
+        settings = get_addon_settings()
+        if settings is None:
+            return {'CANCELLED'}
+        settings.lock_and_key_mode = not settings.lock_and_key_mode
+        return {'FINISHED'}
 
 
 class QUICKSNAP_OT_OpenSettings(bpy.types.Operator):
@@ -1594,6 +1633,13 @@ class QUICKSNAP_PT_toolbar(bpy.types.Panel):
         if settings is None:
             return
         col = self.layout.column()
+        col.prop(settings, "lock_and_key_mode", text="Lock and key")
+        if settings.lock_and_key_mode:
+            col.prop(
+                settings,
+                "lock_and_key_rotate",
+                text="Rotate key to match lock",
+            )
         col.prop(settings, "precision_fit", text="Post-snap precision fit")
         col.prop(settings, "corner_snapping", text="Prefer corners")
         col.prop(settings, "hide_selection_over_target", text="Hide dragged over target")
@@ -1602,6 +1648,7 @@ class QUICKSNAP_PT_toolbar(bpy.types.Panel):
 blender_classes = [
     QuickVertexSnapOperator,
     QuickVertexSnapPreference,
+    QUICKSNAP_OT_toggle_lock_key,
     QUICKSNAP_OT_OpenSettings,
     QUICKSNAP_PT_toolbar,
     VIEW3D_MT_PIE_quicksnap

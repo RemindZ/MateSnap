@@ -2,6 +2,7 @@ import importlib.util
 import math
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import types
 
@@ -344,6 +345,49 @@ def assert_atomic_hierarchy_transform():
         raise AssertionError("solver failure changed the selected hierarchy")
 
 
+def assert_lock_key_settings_persist():
+    annotations = quicksnap.QuickVertexSnapPreference.__annotations__
+    for identifier in ("lock_and_key_mode", "lock_and_key_rotate"):
+        prop = annotations.get(identifier)
+        if prop is None or prop.function is not bpy.props.BoolProperty:
+            raise AssertionError(f"{identifier} is not a Boolean preference")
+        if prop.keywords.get("default") is not False:
+            raise AssertionError(f"{identifier} must default off")
+
+    properties = [
+        SimpleNamespace(
+            identifier="lock_and_key_mode", is_readonly=False
+        ),
+        SimpleNamespace(
+            identifier="lock_and_key_rotate", is_readonly=False
+        ),
+    ]
+    settings = SimpleNamespace(
+        bl_rna=SimpleNamespace(properties=properties),
+        lock_and_key_mode=True,
+        lock_and_key_rotate=False,
+    )
+    original_get_settings = quicksnap.quicksnap_utils.get_addon_settings
+    original_path = quicksnap.settings_file_path
+    with tempfile.TemporaryDirectory() as directory:
+        path = str(Path(directory) / "quicksnap_settings.json")
+        quicksnap.quicksnap_utils.get_addon_settings = lambda: settings
+        quicksnap.settings_file_path = lambda: path
+        try:
+            quicksnap.save_settings()
+            settings.lock_and_key_mode = False
+            settings.lock_and_key_rotate = True
+            quicksnap.load_settings()
+        finally:
+            quicksnap.quicksnap_utils.get_addon_settings = original_get_settings
+            quicksnap.settings_file_path = original_path
+    if (
+        settings.lock_and_key_mode is not True
+        or settings.lock_and_key_rotate is not False
+    ):
+        raise AssertionError("Lock and key preferences did not round-trip")
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -372,6 +416,8 @@ def main():
     print("optional rotation: PASS")
     assert_atomic_hierarchy_transform()
     print("atomic hierarchy transform: PASS")
+    assert_lock_key_settings_persist()
+    print("Lock and key settings: PASS")
     print("lock_key_regression: PASS")
 
 
