@@ -1,6 +1,7 @@
 ﻿import bpy, mathutils, logging
 from mathutils import Vector
 from enum import Enum
+import itertools
 import math
 from bpy_extras import view3d_utils
 import numpy as np
@@ -590,6 +591,12 @@ def _connector_side_pairs(patches, anchor):
                 or low_distance > tolerance or high_distance < -tolerance
             ):
                 continue
+            if abs(low_distance) <= tolerance:
+                anchor_side = 'low'
+            elif abs(high_distance) <= tolerance:
+                anchor_side = 'high'
+            else:
+                anchor_side = None
             depth_hint = first['normal'] + second['normal']
             depth_length = float(np.linalg.norm(depth_hint))
             if depth_length > 1e-12:
@@ -605,6 +612,7 @@ def _connector_side_pairs(patches, anchor):
                 'mid': 0.5 * (low_distance + high_distance),
                 'center': anchor + 0.5 * (low_distance + high_distance) * lateral,
                 'anchor': anchor,
+                'anchor_side': anchor_side,
                 'width': width,
                 'opening_angle': math.acos(np.clip(normal_dot, -1.0, 1.0)),
                 'depth_hint': depth_hint,
@@ -665,6 +673,119 @@ def _match_connector_pairs(source_pairs, target_pairs, rotation=None):
             for other_index, other in enumerate(matches)
         )
     ]
+
+
+def _fit_connector_rotation(correspondences):
+    if len(correspondences) < 4:
+        return None
+    source = np.array([item[0] for item in correspondences], dtype=np.float64)
+    target = np.array([item[1] for item in correspondences], dtype=np.float64)
+    if (
+        not np.isfinite(source).all() or not np.isfinite(target).all()
+        or np.linalg.matrix_rank(source, tol=math.sin(math.radians(5.0))) < 2
+    ):
+        return None
+    try:
+        u, _, vh = np.linalg.svd(source.T @ target)
+    except np.linalg.LinAlgError:
+        return None
+    rotation = vh.T @ u.T
+    if np.linalg.det(rotation) < 0.0:
+        vh[-1] *= -1.0
+        rotation = vh.T @ u.T
+    if (
+        not np.isfinite(rotation).all()
+        or abs(float(np.linalg.det(rotation)) - 1.0) > 1e-8
+    ):
+        return None
+    residuals = np.clip(
+        np.sum((source @ rotation.T) * target, axis=1), -1.0, 1.0
+    )
+    if float(np.min(residuals)) < _FIT_COS_5:
+        return None
+    return rotation
+
+
+def _rotation_candidates(source_pairs, target_pairs):
+    if len(source_pairs) < 2 or len(target_pairs) < 2:
+        return []
+    candidates = []
+    for sources in itertools.permutations(source_pairs, 2):
+        if abs(float(sources[0]['axis'] @ sources[1]['axis'])) >= _FIT_COS_5:
+            continue
+        for targets in itertools.permutations(target_pairs, 2):
+            if abs(float(targets[0]['axis'] @ targets[1]['axis'])) >= _FIT_COS_5:
+                continue
+            swap_options = []
+            for source, target in zip(sources, targets):
+                tolerance = source['tolerance'] + target['tolerance']
+                if (
+                    abs(source['opening_angle'] - target['opening_angle'])
+                    > math.radians(5.0)
+                    or target['width'] - source['width'] <= tolerance
+                    or bool(source['anchor_side']) != bool(target['anchor_side'])
+                ):
+                    break
+                if source['anchor_side']:
+                    swap_options.append((
+                        source['anchor_side'] != target['anchor_side'],
+                    ))
+                else:
+                    swap_options.append((False, True))
+            else:
+                if not any(source['anchor_side'] for source in sources):
+                    continue
+                for swaps in itertools.product(*swap_options):
+                    correspondences = []
+                    for source, target, swap in zip(sources, targets, swaps):
+                        target_low = (
+                            target['high_patch'] if swap else target['low_patch']
+                        )
+                        target_high = (
+                            target['low_patch'] if swap else target['high_patch']
+                        )
+                        correspondences.extend((
+                            (source['low_patch']['normal'], -target_low['normal']),
+                            (source['high_patch']['normal'], -target_high['normal']),
+                        ))
+                    rotation = _fit_connector_rotation(correspondences)
+                    if rotation is None or any(
+                        np.allclose(
+                            rotation, item['rotation'], atol=1e-8, rtol=0.0
+                        )
+                        for item in candidates
+                    ):
+                        continue
+                    candidates.append({'rotation': rotation})
+    return candidates
+
+
+def _rotate_connector_pairs(pairs, rotation):
+    result = []
+    for pair in pairs:
+        rotated = dict(pair)
+        rotated['anchor'] = rotation @ pair['anchor']
+        rotated['center'] = rotation @ pair['center']
+        rotated['axis'] = rotation @ pair['axis']
+        rotated['depth_hint'] = rotation @ pair['depth_hint']
+        rotated['low_patch'] = dict(pair['low_patch'])
+        rotated['high_patch'] = dict(pair['high_patch'])
+        for name in ('low_patch', 'high_patch'):
+            rotated[name]['point'] = rotation @ pair[name]['point']
+            rotated[name]['normal'] = rotation @ pair[name]['normal']
+        dominant = int(np.argmax(np.abs(rotated['axis'])))
+        if rotated['axis'][dominant] < 0.0:
+            rotated['axis'] *= -1.0
+            rotated['low_patch'], rotated['high_patch'] = (
+                rotated['high_patch'], rotated['low_patch']
+            )
+            rotated['low'], rotated['high'] = -pair['high'], -pair['low']
+            if pair['anchor_side'] == 'low':
+                rotated['anchor_side'] = 'high'
+            elif pair['anchor_side'] == 'high':
+                rotated['anchor_side'] = 'low'
+        result.append(rotated)
+    return result
 
 
 def _connector_gaps(match, translation):
@@ -771,13 +892,67 @@ def compute_lock_key_transform(
     )
     matches = _match_connector_pairs(source_pairs, target_pairs)
     translation = _solve_lock_key_translation(matches, source_anchor, target_anchor)
-    if translation is None:
-        logger.debug("Lock and key skipped: no unambiguous connector wall pairs")
+    if translation is not None and _validate_lock_key_transform(matches, translation):
+        return mathutils.Matrix.Translation(
+            Vector(tuple(float(value) for value in translation))
+        )
+    if not allow_rotation:
+        logger.debug("Lock and key skipped: no unambiguous translation-only match")
         return None
-    if not _validate_lock_key_transform(matches, translation):
-        logger.debug("Lock and key skipped: proposed translation failed validation")
+
+    valid = []
+    for candidate in _rotation_candidates(source_pairs, target_pairs):
+        rotation = candidate['rotation']
+        rotated_pairs = _rotate_connector_pairs(source_pairs, rotation)
+        rotated_anchor = rotation @ source_anchor
+        rotated_matches = _match_connector_pairs(rotated_pairs, target_pairs)
+        if len(rotated_matches) < 2:
+            continue
+        axes = np.array([match['axis'] for match in rotated_matches])
+        if np.linalg.matrix_rank(axes, tol=math.sin(math.radians(5.0))) < 2:
+            continue
+        rotated_translation = _solve_lock_key_translation(
+            rotated_matches, rotated_anchor, target_anchor
+        )
+        if (
+            rotated_translation is None
+            or not _validate_lock_key_transform(
+                rotated_matches, rotated_translation
+            )
+        ):
+            continue
+        rotation_matrix = mathutils.Matrix.Identity(4)
+        for row in range(3):
+            for column in range(3):
+                rotation_matrix[row][column] = float(rotation[row, column])
+        delta = mathutils.Matrix.Translation(
+            Vector(tuple(float(value) for value in rotated_translation))
+        ) @ rotation_matrix
+        angle = delta.to_quaternion().angle
+        if not any(
+            np.allclose(
+                np.array(delta), np.array(item[1]), atol=1e-7, rtol=0.0
+            )
+            for item in valid
+        ):
+            valid.append((angle, delta))
+    if not valid:
+        logger.debug("Lock and key skipped: no valid rigid connector match")
         return None
-    return mathutils.Matrix.Translation(Vector(tuple(float(value) for value in translation)))
+    valid.sort(key=lambda item: item[0])
+    if (
+        len(valid) > 1
+        and abs(valid[1][0] - valid[0][0]) <= 1e-7
+        and not np.allclose(
+            np.array(valid[0][1]),
+            np.array(valid[1][1]),
+            atol=1e-7,
+            rtol=0.0,
+        )
+    ):
+        logger.debug("Lock and key skipped: rigid connector match is ambiguous")
+        return None
+    return valid[0][1]
 
 
 def get_axis_target(origin, target, axis_constraint, obj=None):
