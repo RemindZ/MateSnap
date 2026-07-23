@@ -551,6 +551,235 @@ def compute_precision_fit(context, settings,
     return Vector(tuple(float(value) for value in translation))
 
 
+def _connector_side_pairs(patches, anchor):
+    """Describe clean opposed connector walls at the user's surface hit."""
+    anchor = np.array(anchor, dtype=np.float64)
+    pairs = []
+    for index, first in enumerate(patches):
+        for second in patches[index + 1:]:
+            normal_dot = float(first['normal'] @ second['normal'])
+            if normal_dot >= 0.0:
+                continue
+            lateral = first['normal'] - second['normal']
+            length = float(np.linalg.norm(lateral))
+            if length <= 1e-12:
+                continue
+            lateral /= length
+            dominant = int(np.argmax(np.abs(lateral)))
+            if lateral[dominant] < 0:
+                lateral *= -1.0
+
+            crossings = []
+            for patch in (first, second):
+                denominator = float(patch['normal'] @ lateral)
+                if abs(denominator) < 0.5:
+                    crossings = []
+                    break
+                distance = float(patch['normal'] @ (patch['point'] - anchor)) / denominator
+                crossings.append((distance, patch))
+            if not crossings:
+                continue
+            crossings.sort(key=lambda item: item[0])
+            (low_distance, low_patch), (high_distance, high_patch) = crossings
+            tolerance = first['tolerance'] + second['tolerance']
+            width = high_distance - low_distance
+            if (
+                first['area'] <= 0.0 or second['area'] <= 0.0
+                or first['extent'] <= 0.0 or second['extent'] <= 0.0
+                or width <= tolerance
+                or low_distance > tolerance or high_distance < -tolerance
+            ):
+                continue
+            depth_hint = first['normal'] + second['normal']
+            depth_length = float(np.linalg.norm(depth_hint))
+            if depth_length > 1e-12:
+                depth_hint /= depth_length
+            else:
+                depth_hint = np.zeros(3, dtype=np.float64)
+            pairs.append({
+                'axis': lateral,
+                'low_patch': low_patch,
+                'high_patch': high_patch,
+                'low': low_distance,
+                'high': high_distance,
+                'mid': 0.5 * (low_distance + high_distance),
+                'center': anchor + 0.5 * (low_distance + high_distance) * lateral,
+                'anchor': anchor,
+                'width': width,
+                'opening_angle': math.acos(np.clip(normal_dot, -1.0, 1.0)),
+                'depth_hint': depth_hint,
+                'tolerance': tolerance,
+            })
+    return sorted(
+        pairs,
+        key=lambda pair: tuple(np.round(pair['axis'], 9))
+        + (round(pair['opening_angle'], 9), round(pair['width'], 9)),
+    )
+
+
+def _match_connector_pairs(source_pairs, target_pairs, rotation=None):
+    """Match compatible male/female wall pairs without guessing through ambiguity."""
+    angle_tolerance = math.radians(5.0)
+    opposed_limit = math.cos(math.radians(170.0))
+    matches = []
+    for source in source_pairs:
+        candidates = []
+        for target in target_pairs:
+            if float(source['axis'] @ target['axis']) < _FIT_COS_5:
+                continue
+            if abs(source['opening_angle'] - target['opening_angle']) > angle_tolerance:
+                continue
+            if float(source['low_patch']['normal'] @ target['low_patch']['normal']) > opposed_limit:
+                continue
+            if float(source['high_patch']['normal'] @ target['high_patch']['normal']) > opposed_limit:
+                continue
+            tolerance = source['tolerance'] + target['tolerance']
+            clearance = target['width'] - source['width']
+            if clearance <= tolerance:
+                continue
+            distance = float(np.linalg.norm(target['center'] - target['anchor']))
+            candidates.append((distance, tolerance, target, clearance))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: item[0])
+        if (
+            len(candidates) > 1
+            and candidates[1][0] - candidates[0][0]
+            <= candidates[0][1] + candidates[1][1]
+        ):
+            continue
+        _, tolerance, target, clearance = candidates[0]
+        matches.append({
+            'axis': source['axis'],
+            'source': source,
+            'target': target,
+            'clearance': clearance,
+            'tolerance': tolerance,
+        })
+
+    return [
+        match for index, match in enumerate(matches)
+        if not any(
+            index != other_index
+            and abs(float(match['axis'] @ other['axis'])) >= _FIT_COS_5
+            for other_index, other in enumerate(matches)
+        )
+    ]
+
+
+def _connector_gaps(match, translation):
+    source = match['source']
+    target = match['target']
+    low_normal = target['low_patch']['normal']
+    high_normal = target['high_patch']['normal']
+    low_gap = float(
+        low_normal @ (
+            source['low_patch']['point'] + translation - target['low_patch']['point']
+        )
+    )
+    high_gap = float(
+        high_normal @ (
+            source['high_patch']['point'] + translation - target['high_patch']['point']
+        )
+    )
+    return low_gap, high_gap
+
+
+def _solve_lock_key_translation(matches, source_hit, target_hit):
+    if not matches:
+        return None
+    coarse = np.array(target_hit, dtype=np.float64) - np.array(source_hit, dtype=np.float64)
+    rows = []
+    right_hand_side = []
+    for match in matches:
+        low_gap, high_gap = _connector_gaps(match, coarse)
+        rows.append(
+            match['target']['low_patch']['normal']
+            - match['target']['high_patch']['normal']
+        )
+        right_hand_side.append(-(low_gap - high_gap))
+    rows = np.array(rows, dtype=np.float64)
+    right_hand_side = np.array(right_hand_side, dtype=np.float64)
+    try:
+        correction = np.linalg.lstsq(rows, right_hand_side, rcond=0.1)[0]
+        _, singular, vh = np.linalg.svd(rows, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return None
+    if len(singular) == 0 or singular[0] <= 0.0:
+        return None
+    basis = vh[singular >= 0.1 * singular[0]]
+    if len(basis) == 0:
+        return None
+    correction = basis.T @ (basis @ correction)
+    translation = coarse + correction
+    if not np.isfinite(translation).all():
+        return None
+    return translation
+
+
+def _validate_lock_key_transform(matches, translation, insertion_axis=None):
+    translation = np.array(translation, dtype=np.float64)
+    if not np.isfinite(translation).all():
+        return False
+    for match in matches:
+        low_gap, high_gap = _connector_gaps(match, translation)
+        tolerance = match['tolerance']
+        if low_gap < -tolerance or high_gap < -tolerance:
+            return False
+        if abs(low_gap - high_gap) > tolerance:
+            return False
+        coarse = match['target']['anchor'] - match['source']['anchor']
+        correction = translation - coarse
+        cap = min(0.25 * match['source']['width'], 2.0 * match['clearance']) + tolerance
+        if abs(float(match['axis'] @ correction)) > cap:
+            return False
+    return True
+
+
+def compute_lock_key_transform(
+        context, settings,
+        source_object_name, source_face_index, source_hit,
+        target_object_name, target_face_index, target_hit,
+        allow_rotation=False):
+    """Return one safe world delta for a two-surface-click connector mate."""
+    source_obj = bpy.data.objects.get(source_object_name)
+    target_obj = bpy.data.objects.get(target_object_name)
+    if (
+        source_obj is None or target_obj is None
+        or source_obj.type != 'MESH' or target_obj.type != 'MESH'
+    ):
+        logger.debug("Lock and key skipped: source or target mesh is unavailable")
+        return None
+    depsgraph = context.evaluated_depsgraph_get()
+    ignore_modifiers = getattr(settings, 'ignore_modifiers', False)
+    source_fit = source_obj if ignore_modifiers else source_obj.evaluated_get(depsgraph)
+    target_fit = target_obj if ignore_modifiers else target_obj.evaluated_get(depsgraph)
+    source_data = _mesh_fit_data(source_fit)
+    target_data = _mesh_fit_data(target_fit)
+    source_seeds = _seed_polygons(source_data, 'FACES', source_face_index)
+    target_seeds = _seed_polygons(target_data, 'FACES', target_face_index)
+    if not source_seeds or not target_seeds:
+        logger.debug("Lock and key skipped: surface face is stale")
+        return None
+    source_anchor = np.array(source_hit, dtype=np.float64)
+    target_anchor = np.array(target_hit, dtype=np.float64)
+    source_pairs = _connector_side_pairs(
+        _candidate_patches(source_data, source_seeds), source_anchor
+    )
+    target_pairs = _connector_side_pairs(
+        _candidate_patches(target_data, target_seeds), target_anchor
+    )
+    matches = _match_connector_pairs(source_pairs, target_pairs)
+    translation = _solve_lock_key_translation(matches, source_anchor, target_anchor)
+    if translation is None:
+        logger.debug("Lock and key skipped: no unambiguous connector wall pairs")
+        return None
+    if not _validate_lock_key_transform(matches, translation):
+        logger.debug("Lock and key skipped: proposed translation failed validation")
+        return None
+    return mathutils.Matrix.Translation(Vector(tuple(float(value) for value in translation)))
+
+
 def get_axis_target(origin, target, axis_constraint, obj=None):
     """
     Returns the snapping target taking into account constrain options
