@@ -609,7 +609,6 @@ def _connector_side_pairs(patches, anchor):
                 'high_patch': high_patch,
                 'low': low_distance,
                 'high': high_distance,
-                'mid': 0.5 * (low_distance + high_distance),
                 'center': anchor + 0.5 * (low_distance + high_distance) * lateral,
                 'anchor': anchor,
                 'anchor_side': anchor_side,
@@ -625,7 +624,7 @@ def _connector_side_pairs(patches, anchor):
     )
 
 
-def _match_connector_pairs(source_pairs, target_pairs, rotation=None):
+def _match_connector_pairs(source_pairs, target_pairs):
     """Match compatible male/female wall pairs without guessing through ambiguity."""
     angle_tolerance = math.radians(5.0)
     opposed_limit = math.cos(math.radians(170.0))
@@ -706,11 +705,106 @@ def _fit_connector_rotation(correspondences):
     return rotation
 
 
-def _rotation_candidates(source_pairs, target_pairs):
+# Pair formation only requires the two walls to face away from each other at all,
+# so numerically-orthogonal neighbours (90.000001 degrees) qualify. They are not
+# opposed connector walls and they inflate the enumeration below quadratically.
+_ROTATION_MIN_OPENING = math.radians(95.0)
+# Above this many plausible pairs the connector is not the flat-sided kind this
+# feature supports (a faceted round peg reaches dozens), and the enumeration is
+# quadratic in each list. Fail closed rather than freeze the modal.
+_ROTATION_MAX_PAIRS = 8
+
+
+def _rotation_compatible(source, target):
+    """Could this source/target mapping ever fit? Rotation-invariant tests only."""
+    tolerance = source['tolerance'] + target['tolerance']
+    return (
+        abs(source['opening_angle'] - target['opening_angle']) <= math.radians(5.0)
+        and target['width'] - source['width'] > tolerance
+    )
+
+
+def _rotation_axis_ambiguous(pairs):
+    """True when one axis carries two pairs that would constrain it differently."""
+    for index, first in enumerate(pairs):
+        for second in pairs[index + 1:]:
+            if abs(float(first['axis'] @ second['axis'])) < _FIT_COS_5:
+                continue
+            if (
+                abs(first['opening_angle'] - second['opening_angle'])
+                > math.radians(5.0)
+                or float(
+                    first['low_patch']['normal'] @ second['low_patch']['normal']
+                ) < _FIT_COS_5
+                or float(
+                    first['high_patch']['normal'] @ second['high_patch']['normal']
+                ) < _FIT_COS_5
+            ):
+                return True
+    return False
+
+
+def _prune_rotation_pairs(source_pairs, target_pairs):
+    """Reduce both lists to pairs that could plausibly drive a rotation.
+
+    Every test here is rotation-invariant, so pruning can never prefer one
+    orientation over another. Returns None when the input is too ambiguous or too
+    large to decide safely; rotation then fails closed, which is what the design
+    asks for on round, noisy, and ambiguous connectors.
+    """
+    sources = [
+        pair for pair in source_pairs
+        if pair['opening_angle'] >= _ROTATION_MIN_OPENING
+    ]
+    targets = [
+        pair for pair in target_pairs
+        if pair['opening_angle'] >= _ROTATION_MIN_OPENING
+    ]
+    sources = [
+        source for source in sources
+        if any(_rotation_compatible(source, target) for target in targets)
+    ]
+    targets = [
+        target for target in targets
+        if any(_rotation_compatible(source, target) for source in sources)
+    ]
+    for label, pairs in (('source', sources), ('target', targets)):
+        if len(pairs) > _ROTATION_MAX_PAIRS:
+            logger.debug(
+                f"Lock and key rotation skipped: {len(pairs)} plausible {label}"
+                f" pairs exceeds the {_ROTATION_MAX_PAIRS} supported by flat-sided"
+                f" connectors"
+            )
+            return None
+        if _rotation_axis_ambiguous(pairs):
+            logger.debug(
+                f"Lock and key rotation skipped: competing {label} pairs on one axis"
+            )
+            return None
+    return sources, targets
+
+
+def _rotation_candidates(source_pairs, target_pairs, allow_mixed_anchor=False):
+    """Enumerate compatible source/target wall mappings.
+
+    `allow_mixed_anchor` pairs a wall click against a floor click. That mapping is
+    only safe when the caller also supplies the target face normal, because nothing
+    else constrains the insertion axis and an end-for-end flip otherwise satisfies
+    every lateral test. The two travel together deliberately.
+    """
+    if len(source_pairs) < 2 or len(target_pairs) < 2:
+        return []
+    pruned = _prune_rotation_pairs(source_pairs, target_pairs)
+    if pruned is None:
+        return []
+    source_pairs, target_pairs = pruned
     if len(source_pairs) < 2 or len(target_pairs) < 2:
         return []
     candidates = []
-    for sources in itertools.permutations(source_pairs, 2):
+    # Combinations, not permutations: the target side already enumerates both
+    # mappings, so (b,a)x(d,c) only repeats (a,b)x(c,d) and is discarded by the
+    # dedup below -- after paying for its SVD.
+    for sources in itertools.combinations(source_pairs, 2):
         if abs(float(sources[0]['axis'] @ sources[1]['axis'])) >= _FIT_COS_5:
             continue
         for targets in itertools.permutations(target_pairs, 2):
@@ -723,10 +817,19 @@ def _rotation_candidates(source_pairs, target_pairs):
                     abs(source['opening_angle'] - target['opening_angle'])
                     > math.radians(5.0)
                     or target['width'] - source['width'] <= tolerance
-                    or bool(source['anchor_side']) != bool(target['anchor_side'])
+                    or (
+                        not allow_mixed_anchor
+                        and bool(source['anchor_side'])
+                        != bool(target['anchor_side'])
+                    )
                 ):
                     break
-                if source['anchor_side']:
+                # Anchoring only pins the wall correspondence when BOTH clicks
+                # landed on a wall. The documented target click is "inside the
+                # lock", which may be its floor, so a mixed pairing enumerates both
+                # mappings and leans on the insertion-axis guard to discard the
+                # flipped one.
+                if source['anchor_side'] and target['anchor_side']:
                     swap_options.append((
                         source['anchor_side'] != target['anchor_side'],
                     ))
@@ -838,7 +941,7 @@ def _solve_lock_key_translation(matches, source_hit, target_hit):
     return translation
 
 
-def _validate_lock_key_transform(matches, translation, insertion_axis=None):
+def _validate_lock_key_transform(matches, translation):
     translation = np.array(translation, dtype=np.float64)
     if not np.isfinite(translation).all():
         return False
@@ -857,12 +960,66 @@ def _validate_lock_key_transform(matches, translation, insertion_axis=None):
     return True
 
 
+def _buries_key_behind_target(pairs, translation, target_hit, target_normal):
+    """True when a candidate seats the connector behind the surface that was clicked.
+
+    Clearance validation only constrains the matched lateral axes; the insertion
+    axis is left free. Without this, a rigid candidate can rotate the key end for
+    end and sink it through the floor of the socket while every lateral test still
+    passes. The clicked target face normal points out of its material, so every
+    part of the mated connector has to stay on that side of it.
+    """
+    if target_normal is None:
+        return False
+    normal = np.array(target_normal, dtype=np.float64)
+    length = float(np.linalg.norm(normal))
+    if length <= 1e-12:
+        return False
+    normal /= length
+    anchor = np.array(target_hit, dtype=np.float64)
+    for pair in pairs:
+        tolerance = pair['tolerance']
+        for name in ('low_patch', 'high_patch'):
+            point = pair[name]['point'] + translation
+            if float(normal @ (point - anchor)) < -tolerance:
+                return True
+    return False
+
+
+def _connector_placement_signature(matches, translation):
+    """Where a candidate actually leaves the mated walls, as a set of world planes.
+
+    Two candidates are geometrically equivalent only when they seat the mated walls
+    identically -- that is what makes a symmetric connector's alternative solutions
+    interchangeable, and it is the only case where the design allows preferring the
+    smaller rotation. Anything else is a different seating and must fail closed.
+    """
+    planes = []
+    for match in matches:
+        source = match['source']
+        for name in ('low_patch', 'high_patch'):
+            patch = source[name]
+            normal = patch['normal']
+            point = patch['point'] + translation
+            planes.append(
+                tuple(np.round(normal, 6).tolist())
+                + (round(float(normal @ point), 6),)
+            )
+    return tuple(sorted(planes))
+
+
 def compute_lock_key_transform(
         context, settings,
         source_object_name, source_face_index, source_hit,
         target_object_name, target_face_index, target_hit,
-        allow_rotation=False):
-    """Return one safe world delta for a two-surface-click connector mate."""
+        allow_rotation=False,
+        source_mesh_data=None, target_mesh_data=None,
+        source_normal=None, target_normal=None):
+    """Return one safe world delta for a two-surface-click connector mate.
+
+    The caller may hand in already-extracted mesh data; extraction dominates the
+    cost on dense meshes and the operator has usually paid for it already.
+    """
     source_obj = bpy.data.objects.get(source_object_name)
     target_obj = bpy.data.objects.get(target_object_name)
     if (
@@ -881,8 +1038,12 @@ def compute_lock_key_transform(
     ignore_modifiers = getattr(settings, 'ignore_modifiers', False)
     source_fit = source_obj if ignore_modifiers else source_obj.evaluated_get(depsgraph)
     target_fit = target_obj if ignore_modifiers else target_obj.evaluated_get(depsgraph)
-    source_data = _mesh_fit_data(source_fit)
-    target_data = _mesh_fit_data(target_fit)
+    source_data = (
+        _mesh_fit_data(source_fit) if source_mesh_data is None else source_mesh_data
+    )
+    target_data = (
+        _mesh_fit_data(target_fit) if target_mesh_data is None else target_mesh_data
+    )
     source_seeds = _seed_polygons(source_data, 'FACES', source_face_index)
     target_seeds = _seed_polygons(target_data, 'FACES', target_face_index)
     if not source_seeds or not target_seeds:
@@ -907,7 +1068,10 @@ def compute_lock_key_transform(
         return None
 
     valid = []
-    for candidate in _rotation_candidates(source_pairs, target_pairs):
+    for candidate in _rotation_candidates(
+        source_pairs, target_pairs,
+        allow_mixed_anchor=target_normal is not None,
+    ):
         rotation = candidate['rotation']
         rotated_pairs = _rotate_connector_pairs(source_pairs, rotation)
         rotated_anchor = rotation @ source_anchor
@@ -925,6 +1089,10 @@ def compute_lock_key_transform(
             or not _validate_lock_key_transform(
                 rotated_matches, rotated_translation
             )
+            or _buries_key_behind_target(
+                rotated_pairs, rotated_translation,
+                target_anchor, target_normal,
+            )
         ):
             continue
         rotation_matrix = mathutils.Matrix.Identity(4)
@@ -941,23 +1109,23 @@ def compute_lock_key_transform(
             )
             for item in valid
         ):
-            valid.append((angle, delta))
+            valid.append((
+                angle, delta,
+                _connector_placement_signature(
+                    rotated_matches, rotated_translation
+                ),
+            ))
     if not valid:
         logger.debug("Lock and key skipped: no valid rigid connector match")
         return None
-    valid.sort(key=lambda item: item[0])
-    if (
-        len(valid) > 1
-        and abs(valid[1][0] - valid[0][0]) <= 1e-7
-        and not np.allclose(
-            np.array(valid[0][1]),
-            np.array(valid[1][1]),
-            atol=1e-7,
-            rtol=0.0,
-        )
-    ):
-        logger.debug("Lock and key skipped: rigid connector match is ambiguous")
+    # Smallest-angle ranking is only legitimate between candidates that seat the
+    # mated walls identically. Candidates that seat them differently are a genuine
+    # ambiguity, and preferring the nearer one would silently pick an orientation
+    # the geometry never justified.
+    if len({item[2] for item in valid}) > 1:
+        logger.debug("Lock and key skipped: rigid candidates seat the key differently")
         return None
+    valid.sort(key=lambda item: item[0])
     return valid[0][1]
 
 

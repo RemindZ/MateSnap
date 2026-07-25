@@ -13,6 +13,37 @@
   supported. Round, organic, stale, incompatible, or ambiguous geometry fails
   closed without changing the selected hierarchy.
 
+### Fixed
+- Lock and key honours "Ignore modifiers" again. Surface picking reported
+  evaluated geometry while the solver read the base mesh, so on any object with a
+  geometry-changing modifier the face index belonged to a different mesh than the
+  one being measured. Raw picking now uses a cached base-mesh BVH, so the index and
+  the hit always come from the geometry the solver reads.
+- A rigid match can no longer seat the key pointing out of its socket. Clearance
+  only constrains the matched lateral walls, so an end-for-end flip satisfied every
+  test and, with the key starting near that orientation, was also the smallest
+  rotation. The clicked target face normal now constrains the insertion axis, and
+  candidates that seat the mated walls differently are rejected as ambiguous.
+- Optional rotation no longer freezes Blender on unsupported connectors. The
+  candidate search was quadratic in both pair lists; a 16-sided peg took roughly 20
+  seconds to reject and larger ones far longer. Implausible pairs are now discarded
+  up front and oversized or ambiguous sets fail closed, rejecting the same peg in
+  under a millisecond.
+- Descendants of the selected key can no longer be picked as the target lock. They
+  move with the key, so the computed mate was never achieved. They are now
+  pickable as the source, which they previously were not.
+- Switching Lock and key off after picking a connector no longer leaves stale snap
+  state behind, which made the next mouse move translate the selection by an
+  uninitialised value. Switching the mode on when it cannot be entered now declines
+  and leaves the operator running instead of cancelling in-progress work.
+- Backspace re-picks the key after the source connector changes; the warning
+  previously asked for something the modal offered no way to do.
+
+### Changed
+- The two clicks extract each connector mesh once instead of three times, and the
+  target-side preview raycast uses the scene BVH. Staleness is still checked
+  against live mesh data on every click.
+
 ## 1.5.13
 
 ### Changed

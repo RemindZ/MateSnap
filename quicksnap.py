@@ -6,6 +6,7 @@ import logging
 import numpy as np
 import os
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
 
 from . import quicksnap_render
 from . import quicksnap_utils
@@ -17,6 +18,12 @@ from . import addon_updater_ops
 __name_addon__ = '.'.join(__name__.split('.')[:-1])
 logger = logging.getLogger(__name_addon__)
 addon_keymaps = []
+
+# Target picking walks the ray past any hit that belongs to the moving hierarchy.
+# A handful of steps clears realistic nesting; the cap stops a degenerate scene
+# from spinning the modal.
+LOCK_KEY_RAY_STEPS = 8
+LOCK_KEY_RAY_EPSILON = 1e-4
 
 
 
@@ -154,11 +161,11 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = None
         self.lock_key_source_preview = None
         self.lock_key_target_preview = None
+        self.lock_key_moving = None
+        self._lock_key_bvh_cache = {}
+        self._lock_key_mesh_cache = {}
+        self._lock_key_patch_cache = {}
         self.backup_data(context)
-        self.lock_key_original_matrices = {
-            name: matrix.copy()
-            for name, matrix in self.backup_object_positions.items()
-        }
         self.clickdrag = False
         self.last_event = None
         self.clicktime = 0
@@ -530,20 +537,49 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 self.set_selection_hidden(hover_object != "" or self.snap_paused)
 
 
-    def lock_key_geometry_signature(self, context, object_name, face_index):
+    def lock_key_fit_object(self, context, object_name):
+        """The object the solver will read, honouring 'ignore modifiers'."""
         obj = bpy.data.objects.get(object_name)
         if obj is None or obj.type != 'MESH':
             return None
-        depsgraph = context.evaluated_depsgraph_get()
-        fit_obj = (
-            obj if self.settings.ignore_modifiers
-            else obj.evaluated_get(depsgraph)
-        )
-        mesh = fit_obj.data
-        if face_index < 0 or face_index >= len(mesh.polygons):
+        if self.settings.ignore_modifiers:
+            return obj
+        return obj.evaluated_get(context.evaluated_depsgraph_get())
+
+    def lock_key_mesh_data(self, context, object_name):
+        """Extract a connector mesh once per object per mate.
+
+        Extraction is the dominant cost on dense meshes, and the two clicks plus the
+        solver used to pay it three times over. This cache is for solving only --
+        never for deciding whether the geometry is still valid.
+        """
+        cached = self._lock_key_mesh_cache.get(object_name)
+        if cached is not None:
+            return cached
+        fit_obj = self.lock_key_fit_object(context, object_name)
+        if fit_obj is None:
             return None
         try:
             mesh_data = quicksnap_utils._mesh_fit_data(fit_obj)
+        except Exception:
+            return None
+        self._lock_key_mesh_cache[object_name] = mesh_data
+        return mesh_data
+
+    def lock_key_neighborhood(self, context, object_name, face_index):
+        """Polygon indices of the clicked connector, from the cached extraction.
+
+        Only *which* polygons to inspect comes from the cache. The values compared
+        against them are always read fresh.
+        """
+        cache_key = (object_name, int(face_index))
+        cached = self._lock_key_patch_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        mesh_data = self.lock_key_mesh_data(context, object_name)
+        if mesh_data is None:
+            return None
+        try:
             seeds = quicksnap_utils._seed_polygons(
                 mesh_data, 'FACES', face_index
             )
@@ -552,31 +588,52 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return None
         if not patches:
             return None
-        polygon_indices = sorted(set().union(
+        polygon_indices = tuple(sorted(set().union(
             *(patch['polygons'] for patch in patches)
-        ))
+        )))
+        self._lock_key_patch_cache[cache_key] = polygon_indices
+        return polygon_indices
+
+    def lock_key_geometry_signature(self, context, object_name, face_index):
+        """Fingerprint the clicked connector, read fresh from the live mesh.
+
+        Deliberately not derived from the cached extraction: a signature computed
+        from cached data describes the geometry as it was, so a changed source would
+        compare equal to itself and the staleness guard would never fire.
+        """
+        fit_obj = self.lock_key_fit_object(context, object_name)
+        if fit_obj is None:
+            return None
+        mesh = fit_obj.data
+        if face_index < 0 or face_index >= len(mesh.polygons):
+            return None
+        polygon_indices = self.lock_key_neighborhood(
+            context, object_name, face_index
+        )
+        if not polygon_indices:
+            return None
         neighborhood = []
-        for polygon_index in polygon_indices:
-            start = int(mesh_data['loop_starts'][polygon_index])
-            total = int(mesh_data['loop_totals'][polygon_index])
-            vertex_indices = mesh_data['loop_vertices'][start:start + total]
-            neighborhood.append((
-                int(polygon_index),
-                tuple(
-                    (
-                        int(vertex_index),
-                        tuple(
-                            round(float(value), 9)
-                            for value in mesh_data['vertices'][vertex_index]
-                        ),
-                    )
-                    for vertex_index in vertex_indices
-                ),
-                tuple(
-                    round(float(value), 9)
-                    for value in mesh_data['polygon_normals'][polygon_index]
-                ),
-            ))
+        try:
+            for polygon_index in polygon_indices:
+                if polygon_index >= len(mesh.polygons):
+                    return None
+                polygon = mesh.polygons[polygon_index]
+                neighborhood.append((
+                    int(polygon_index),
+                    tuple(
+                        (
+                            int(vertex_index),
+                            tuple(
+                                round(float(value), 9)
+                                for value in mesh.vertices[vertex_index].co
+                            ),
+                        )
+                        for vertex_index in polygon.vertices
+                    ),
+                    tuple(round(float(value), 9) for value in polygon.normal),
+                ))
+        except (IndexError, AttributeError, ReferenceError):
+            return None
         matrix = tuple(
             round(float(value), 12)
             for row in fit_obj.matrix_world
@@ -587,47 +644,199 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             len(mesh.edges),
             len(mesh.polygons),
             len(mesh.loops),
+            int(face_index),
             tuple(neighborhood),
             matrix,
         )
 
-    def raycast_lock_key_surface(self, context, selected_only):
-        depsgraph = context.evaluated_depsgraph_get()
-        selected = set(self.selection_objects)
-        candidates = (
+    def lock_key_moving_names(self):
+        """Every object the mate will move: the selected roots plus all descendants.
+
+        The delta is applied to roots only, so descendants ride along. They must be
+        pickable as the source and rejected as the target -- filtering on the selected
+        names alone gets both halves wrong.
+        """
+        if self.lock_key_moving is not None:
+            return self.lock_key_moving
+        objects = [
             bpy.data.objects.get(name) for name in self.selection_objects
-        ) if selected_only else context.visible_objects
-        closest = None
-        for obj in candidates:
+        ]
+        roots = quicksnap_utils.keep_only_parents(
+            [obj for obj in objects if obj is not None]
+        )
+        names = set()
+        for root in roots:
+            names.add(root.name)
+            names.update(child.name for child in root.children_recursive)
+        self.lock_key_moving = names
+        return names
+
+    def lock_key_base_bvh(self, obj):
+        """Cached local-space BVH over an object's base mesh.
+
+        Object.ray_cast and Scene.ray_cast both report evaluated geometry whichever
+        object you call them on, so honouring 'ignore modifiers' needs a tree of our
+        own. Local space keeps the cache valid while the object moves; it is rebuilt
+        when the base topology changes and dropped when the operator ends.
+        """
+        mesh = obj.data
+        signature = (
+            len(mesh.vertices), len(mesh.edges),
+            len(mesh.polygons), len(mesh.loops),
+        )
+        cached = self._lock_key_bvh_cache.get(obj.name)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        if len(mesh.polygons) == 0:
+            return None
+        tree = BVHTree.FromPolygons(
+            [vertex.co.copy() for vertex in mesh.vertices],
+            [tuple(polygon.vertices) for polygon in mesh.polygons],
+            all_triangles=False,
+        )
+        self._lock_key_bvh_cache[obj.name] = (signature, tree)
+        return tree
+
+    def lock_key_raycast_object(self, obj, depsgraph):
+        """Ray against one object, in whichever geometry the solver will read.
+
+        The design requires the face index to come from the same raw/evaluated mesh
+        that produced the stored hit, so the branch here has to match the branch in
+        compute_lock_key_transform.
+        """
+        if self.settings.ignore_modifiers:
+            tree = self.lock_key_base_bvh(obj)
+            if tree is None:
+                return None
+            fit_obj = obj
+        else:
+            fit_obj = obj.evaluated_get(depsgraph)
+            tree = None
+        matrix = fit_obj.matrix_world
+        inverse = matrix.inverted_safe()
+        origin = inverse @ self.mouse_position_world
+        direction = inverse.to_3x3() @ self.mouse_vector
+        if direction.length_squared == 0.0:
+            return None
+        direction.normalize()
+        if tree is not None:
+            location, normal, face_index, _ = tree.ray_cast(origin, direction)
+            if location is None or face_index is None or face_index < 0:
+                return None
+        else:
+            hit, location, normal, face_index = fit_obj.ray_cast(origin, direction)
+            if not hit or face_index < 0:
+                return None
+        return self.lock_key_hit(
+            obj.name, face_index,
+            matrix @ location,
+            inverse.to_3x3().transposed() @ normal,
+        )
+
+    @staticmethod
+    def lock_key_hit(object_name, face_index, world_location, world_normal):
+        world_normal = world_normal.copy()
+        if world_normal.length_squared > 0.0:
+            world_normal.normalize()
+        return {
+            'object_name': object_name,
+            'face_index': int(face_index),
+            'location': world_location.copy(),
+            'normal': world_normal,
+        }
+
+    def lock_key_ray_hits_bounds(self, obj):
+        """Cheap world-AABB slab test, so raw picking only builds trees it needs."""
+        matrix = obj.matrix_world
+        corners = [matrix @ Vector(corner) for corner in obj.bound_box]
+        origin = self.mouse_position_world
+        direction = self.mouse_vector
+        near = -float('inf')
+        far = float('inf')
+        for axis in range(3):
+            low = min(corner[axis] for corner in corners)
+            high = max(corner[axis] for corner in corners)
+            component = direction[axis]
+            if abs(component) < 1e-12:
+                if origin[axis] < low or origin[axis] > high:
+                    return False
+                continue
+            first = (low - origin[axis]) / component
+            second = (high - origin[axis]) / component
+            if first > second:
+                first, second = second, first
+            near = max(near, first)
+            far = min(far, second)
+            if near > far:
+                return False
+        return far >= 0.0
+
+    def lock_key_raycast_scene(self, context, depsgraph, exclude):
+        """Nearest scene hit that is not part of the moving hierarchy.
+
+        The ray is advanced past excluded hits rather than hiding them: the design
+        forbids hiding the selected part between the two clicks, and hide_set() also
+        silently drops objects from the selection without restoring it.
+        """
+        origin = self.mouse_position_world.copy()
+        direction = self.mouse_vector.normalized()
+        if direction.length_squared == 0.0:
+            return None
+        for _ in range(LOCK_KEY_RAY_STEPS):
+            (hit, location, normal, face_index,
+             obj, matrix) = context.scene.ray_cast(
+                depsgraph, origin=origin, direction=direction)
+            if not hit or obj is None:
+                return None
             if (
-                obj is None or obj.type != 'MESH' or not obj.visible_get()
-                or (not selected_only and obj.name in selected)
+                obj.name not in exclude and obj.type == 'MESH'
+                and face_index >= 0
+            ):
+                # Scene.ray_cast already reports world space.
+                return self.lock_key_hit(
+                    obj.name, face_index, location, normal
+                )
+            origin = location + direction * LOCK_KEY_RAY_EPSILON
+        return None
+
+    def lock_key_raycast_visible(self, context, depsgraph, exclude):
+        """Raw-geometry counterpart of the scene ray, broad-phased by world AABB."""
+        closest = None
+        for obj in context.visible_objects:
+            if (
+                obj is None or obj.type != 'MESH' or obj.name in exclude
+                or not obj.visible_get()
+                or not self.lock_key_ray_hits_bounds(obj)
             ):
                 continue
-            fit_obj = (
-                obj if self.settings.ignore_modifiers
-                else obj.evaluated_get(depsgraph)
-            )
-            inverse = fit_obj.matrix_world.inverted_safe()
-            origin = inverse @ self.mouse_position_world
-            direction = inverse.to_3x3() @ self.mouse_vector
-            if direction.length_squared == 0.0:
+            hit = self.lock_key_raycast_object(obj, depsgraph)
+            if hit is None:
                 continue
-            direction.normalize()
-            hit, location, _, face_index = fit_obj.ray_cast(origin, direction)
-            if not hit or face_index < 0:
-                continue
-            world_location = fit_obj.matrix_world @ location
-            distance = (world_location - self.mouse_position_world).length
+            distance = (hit['location'] - self.mouse_position_world).length
             if closest is None or distance < closest[0]:
-                closest = (
-                    distance,
-                    {
-                        'object_name': obj.name,
-                        'face_index': int(face_index),
-                        'location': world_location.copy(),
-                    },
-                )
+                closest = (distance, hit)
+        return None if closest is None else closest[1]
+
+    def raycast_lock_key_surface(self, context, selected_only):
+        depsgraph = context.evaluated_depsgraph_get()
+        moving = self.lock_key_moving_names()
+        if not selected_only:
+            if self.settings.ignore_modifiers:
+                return self.lock_key_raycast_visible(context, depsgraph, moving)
+            return self.lock_key_raycast_scene(context, depsgraph, moving)
+        # Source phase: the moving set is small and the scene ray cannot filter to
+        # it, so a direct loop is both correct and cheap here.
+        closest = None
+        for name in sorted(moving):
+            obj = bpy.data.objects.get(name)
+            if obj is None or obj.type != 'MESH' or not obj.visible_get():
+                continue
+            hit = self.lock_key_raycast_object(obj, depsgraph)
+            if hit is None:
+                continue
+            distance = (hit['location'] - self.mouse_position_world).length
+            if closest is None or distance < closest[0]:
+                closest = (distance, hit)
         return None if closest is None else closest[1]
 
     def update_lock_key_preview(self, context, region):
@@ -660,10 +869,12 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             signature = self.lock_key_geometry_signature(
                 context, hit['object_name'], int(hit['face_index'])
             )
+        normal = hit.get('normal')
         self.lock_key_source_hit = {
             'object_name': hit['object_name'],
             'face_index': int(hit['face_index']),
             'location': Vector(hit['location']).copy(),
+            'normal': None if normal is None else Vector(normal).copy(),
             'geometry_signature': signature,
         }
         self.lock_key_target_preview = None
@@ -682,18 +893,18 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         source = self.lock_key_source_hit
         if source is None or hit is None:
             return False
-        current_signature = self.lock_key_geometry_signature(
-            context, source['object_name'], source['face_index']
-        )
-        if (
-            source.get('geometry_signature') is not None
-            and current_signature != source['geometry_signature']
-        ):
-            self.report(
-                {'WARNING'},
-                "Lock and key: source connector changed; pick it again",
+        stored_signature = source.get('geometry_signature')
+        if stored_signature is not None:
+            current_signature = self.lock_key_geometry_signature(
+                context, source['object_name'], source['face_index']
             )
-            return False
+            if current_signature != stored_signature:
+                self.report(
+                    {'WARNING'},
+                    "Lock and key: source connector changed; pick it again",
+                )
+                self.reset_lock_key_source()
+                return False
         try:
             delta = quicksnap_utils.compute_lock_key_transform(
                 context,
@@ -707,6 +918,14 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 allow_rotation=getattr(
                     self.settings, "lock_and_key_rotate", False
                 ),
+                source_mesh_data=self.lock_key_mesh_data(
+                    context, source['object_name']
+                ),
+                target_mesh_data=self.lock_key_mesh_data(
+                    context, hit['object_name']
+                ),
+                source_normal=source.get('normal'),
+                target_normal=hit.get('normal'),
             )
         except Exception as error:
             logger.warning(f"Lock and key skipped: {error}")
@@ -719,6 +938,13 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return False
         self.apply_world_delta_to_selection(delta)
         return True
+
+    def reset_lock_key_source(self):
+        """Drop the recorded source so the user can genuinely pick it again."""
+        self.current_state = State.IDLE
+        self.lock_key_source_hit = None
+        self.lock_key_source_preview = None
+        self.lock_key_target_preview = None
 
 
     def apply(self, context, region, use_auto_merge=False):
@@ -801,7 +1027,10 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = None
         self.lock_key_source_preview = None
         self.lock_key_target_preview = None
-        self.lock_key_original_matrices = {}
+        self.lock_key_moving = None
+        self._lock_key_bvh_cache = {}
+        self._lock_key_mesh_cache = {}
+        self._lock_key_patch_cache = {}
         self.source_object = ""
         self.source_element_index = -1
         self.source_snap_type = ""
@@ -897,6 +1126,17 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             self.terminate(context, revert=True)
             return {'CANCELLED'}
 
+        if (
+            event.type == 'BACK_SPACE' and event.value == 'PRESS'
+            and self.current_state == State.SOURCE_PICKED
+        ):
+            # Without this there is no way back to IDLE, so "pick it again" after a
+            # stale-source rejection is not something the user can actually do.
+            self.reset_lock_key_source()
+            self.update_lock_key_preview(context, region)
+            self.update_header(context)
+            return {'RUNNING_MODAL'}
+
         if event.type == 'MOUSEMOVE':
             self.update_mouse_position(context, event)
             self.update_lock_key_preview(context, region)
@@ -931,7 +1171,24 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             self.last_event = event.type
         return {'RUNNING_MODAL'}
 
+    def can_enter_lock_key_mode(self):
+        """Preflight exactly what initialize() would refuse Lock and key for."""
+        return bool(self.object_mode) and not self.no_selection
+
     def switch_lock_key_mode(self, context):
+        # Preflight before teardown. initialize() destroys the live SnapData, so
+        # refusing afterwards would leave nothing to fall back to -- and discarding
+        # an in-progress snap because a pie button was clicked is not acceptable.
+        if (
+            getattr(self.settings, "lock_and_key_mode", False)
+            and not self.can_enter_lock_key_mode()
+        ):
+            self.report(
+                {'WARNING'},
+                "Lock and key requires a selected key in Object mode",
+            )
+            self.settings.lock_and_key_mode = False
+            return True
         self.set_selection_hidden(False)
         self.revert_data(context, apply=True)
         self.set_object_display("", "")
@@ -940,6 +1197,13 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             snapdata_target.is_enabled = False
         self.snapdata_source = None
         self.snapdata_target = None
+        # The normal initialize() never resets these. Leaving a stale SOURCE_PICKED
+        # behind makes the next apply() index the snap buffers with a stale (or -1)
+        # id -- rows numpy never wrote -- and translate the selection by garbage.
+        self.current_state = State.IDLE
+        self.closest_source_id = -1
+        self.closest_target_id = -1
+        self.closest_actionable = False
         if not self.initialize(context):
             return False
         self.update_header(context)
@@ -1253,6 +1517,10 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = None
         self.lock_key_source_preview = None
         self.lock_key_target_preview = None
+        self.lock_key_moving = None
+        self._lock_key_bvh_cache = {}
+        self._lock_key_mesh_cache = {}
+        self._lock_key_patch_cache = {}
         try:
             save_settings()  # keep the settings backup fresh even if Blender never unregisters
         except Exception:
@@ -1263,13 +1531,17 @@ class QuickVertexSnapOperator(bpy.types.Operator):
 
     def update_header(self, context):
         if self.lock_key_active:
+            # Name the wall specifically: a click on the floor of a socket leaves the
+            # insertion depth unconstrained, so it usually fails closed.
             if self.current_state == State.IDLE:
                 context.area.header_text_set(
-                    "Lock and key: click the connector on the selected key"
+                    "Lock and key: click a connector wall on the selected key. "
+                    "Right Mouse Button/ESC to cancel"
                 )
             else:
                 context.area.header_text_set(
-                    "Lock and key: click inside the target lock"
+                    "Lock and key: click the matching wall inside the target lock. "
+                    "Backspace to pick the key again, Right Mouse Button/ESC to cancel"
                 )
             return
         ignore_modifiers_msg = ""
