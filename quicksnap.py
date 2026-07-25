@@ -1462,6 +1462,19 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 print("QuickSnap: Disabling debug. Use Ctrl+Shift+TAB when QuickSnap is enabled to change debug level.")
         self.update_header(context)
 
+    @staticmethod
+    def ensure_active_object(context):
+        """Make something active for mode_set, without assuming a selection exists.
+
+        Starting the tool with nothing selected and finishing without picking
+        anything leaves both the active object and the selection empty, so there is
+        nothing to promote -- and mode_set would have no object to act on either.
+        Returns whether an active object is available.
+        """
+        if context.active_object is None and context.selected_objects:
+            context.view_layer.objects.active = context.selected_objects[0]
+        return context.active_object is not None
+
     def terminate(self, context, revert=False):
         """
         End modal operator, reset header, etc
@@ -1490,9 +1503,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         context.window_manager.event_timer_remove(self._timer)
 
         # Revert mode and selection
-        if self.object_mode:
-            if context.active_object is None:
-                context.view_layer.objects.active = context.selected_objects[0]
+        if self.object_mode and self.ensure_active_object(context):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         if self.no_selection:

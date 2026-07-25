@@ -892,6 +892,52 @@ def assert_refused_mode_switch_is_transactional():
             raise AssertionError(f"{label}: refused switch disturbed the modal state")
 
 
+def assert_terminate_survives_empty_selection():
+    """Finishing with nothing selected must not crash the modal.
+
+    Running the tool with no selection and clicking without picking anything
+    leaves both the active object and the selection empty. Indexing
+    selected_objects[0] there raised IndexError out of modal(), aborting cleanup
+    partway through.
+    """
+    ensure_active = quicksnap.QuickVertexSnapOperator.__dict__[
+        "ensure_active_object"
+    ].__func__
+
+    class FakeContext:
+        """active_object tracks view_layer.objects.active, as Blender's does."""
+
+        def __init__(self, selected, active):
+            self.selected_objects = list(selected)
+            self.view_layer = SimpleNamespace(
+                objects=SimpleNamespace(active=active)
+            )
+
+        @property
+        def active_object(self):
+            return self.view_layer.objects.active
+
+    context = FakeContext([], None)
+    if ensure_active(context) is not False:
+        raise AssertionError("empty selection should report no active object")
+    if context.view_layer.objects.active is not None:
+        raise AssertionError("nothing should have been promoted to active")
+
+    clear_scene()
+    key, _, _, lock, _, _ = make_straight_key_lock()
+    context = FakeContext([key, lock], None)
+    if ensure_active(context) is not True:
+        raise AssertionError("a selection should yield an active object")
+    if context.view_layer.objects.active is not key:
+        raise AssertionError("first selected object was not promoted to active")
+
+    context = FakeContext([key, lock], lock)
+    if ensure_active(context) is not True:
+        raise AssertionError("an existing active object should be kept")
+    if context.view_layer.objects.active is not lock:
+        raise AssertionError("an existing active object must not be replaced")
+
+
 def assert_lock_key_settings_persist():
     annotations = quicksnap.QuickVertexSnapPreference.__annotations__
     for identifier in ("lock_and_key_mode", "lock_and_key_rotate"):
@@ -984,6 +1030,8 @@ def main():
     print("mode switch: PASS")
     assert_refused_mode_switch_is_transactional()
     print("refused mode switch is transactional: PASS")
+    assert_terminate_survives_empty_selection()
+    print("terminate with empty selection: PASS")
     assert_lock_key_settings_persist()
     print("Lock and key settings: PASS")
     print("lock_key_regression: PASS")

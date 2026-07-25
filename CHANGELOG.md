@@ -38,6 +38,9 @@
   and leaves the operator running instead of cancelling in-progress work.
 - Backspace re-picks the key after the source connector changes; the warning
   previously asked for something the modal offered no way to do.
+- Finishing a snap that started with nothing selected no longer raises
+  IndexError out of the modal. With no active object and an empty selection
+  there is nothing to make active, and cleanup aborted partway through.
 
 ### Changed
 - The two clicks extract each connector mesh once instead of three times, and the
