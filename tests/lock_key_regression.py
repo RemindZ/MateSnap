@@ -892,6 +892,70 @@ def assert_refused_mode_switch_is_transactional():
             raise AssertionError(f"{label}: refused switch disturbed the modal state")
 
 
+def assert_failures_report_a_specific_reason():
+    """One generic message for eight causes leaves nothing to try differently."""
+    cases = []
+
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_straight_key_lock()
+    cases.append(("missing object", "MissingKey", key_face, key_hit,
+                  lock.name, lock_face, lock_hit, "not a mesh object"))
+    cases.append(("stale face", key.name, 10_000, key_hit,
+                  lock.name, lock_face, lock_hit, "no longer exists"))
+
+    reasons = {}
+    for label, source_name, source_face, source_hit, \
+            target_name, target_face, target_hit, expected in cases:
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            source_name, source_face, source_hit,
+            target_name, target_face, target_hit,
+            allow_rotation=False, diagnostics=diagnostics,
+        )
+        if delta is not None:
+            raise AssertionError(f"{label}: expected a refusal")
+        if not diagnostics:
+            raise AssertionError(f"{label}: refused without recording a reason")
+        if expected not in diagnostics[-1]:
+            raise AssertionError(
+                f"{label}: reason {diagnostics[-1]!r} does not mention {expected!r}"
+            )
+        reasons[label] = diagnostics[-1]
+
+    # An incompatible pair must not reuse a different stage's wording.
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_key_lock(
+        target_half_width=0.5, target_half_height=0.4
+    )
+    diagnostics = []
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+        allow_rotation=False, diagnostics=diagnostics,
+    )
+    if delta is not None or not diagnostics:
+        raise AssertionError("equal-width connectors should refuse with a reason")
+    if "do not correspond" not in diagnostics[-1]:
+        raise AssertionError(
+            f"equal-width reason is not specific: {diagnostics[-1]!r}"
+        )
+    if diagnostics[-1] in reasons.values():
+        raise AssertionError("distinct causes reported the same reason")
+
+    # A healthy mate must record nothing.
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_straight_key_lock()
+    diagnostics = []
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+        allow_rotation=False, diagnostics=diagnostics,
+    )
+    if delta is None or diagnostics:
+        raise AssertionError(f"successful mate recorded a reason: {diagnostics}")
+
+
 def assert_terminate_survives_empty_selection():
     """Finishing with nothing selected must not crash the modal.
 
@@ -1030,6 +1094,8 @@ def main():
     print("mode switch: PASS")
     assert_refused_mode_switch_is_transactional()
     print("refused mode switch is transactional: PASS")
+    assert_failures_report_a_specific_reason()
+    print("specific failure reasons: PASS")
     assert_terminate_survives_empty_selection()
     print("terminate with empty selection: PASS")
     assert_lock_key_settings_persist()

@@ -1008,13 +1008,25 @@ def _connector_placement_signature(matches, translation):
     return tuple(sorted(planes))
 
 
+def _note_lock_key_skip(diagnostics, message):
+    """Record why a mate was refused.
+
+    One generic 'no safe connector match found' covers eight distinct causes, which
+    tells the user nothing about what to do differently. The caller surfaces this.
+    """
+    logger.debug(f"Lock and key skipped: {message}")
+    if diagnostics is not None:
+        diagnostics.append(message)
+
+
 def compute_lock_key_transform(
         context, settings,
         source_object_name, source_face_index, source_hit,
         target_object_name, target_face_index, target_hit,
         allow_rotation=False,
         source_mesh_data=None, target_mesh_data=None,
-        source_normal=None, target_normal=None):
+        source_normal=None, target_normal=None,
+        diagnostics=None):
     """Return one safe world delta for a two-surface-click connector mate.
 
     The caller may hand in already-extracted mesh data; extraction dominates the
@@ -1026,13 +1038,13 @@ def compute_lock_key_transform(
         source_obj is None or target_obj is None
         or source_obj.type != 'MESH' or target_obj.type != 'MESH'
     ):
-        logger.debug("Lock and key skipped: source or target mesh is unavailable")
+        _note_lock_key_skip(diagnostics, "source or target is not a mesh object")
         return None
     if (
         abs(source_obj.matrix_world.to_3x3().determinant()) <= 1e-12
         or abs(target_obj.matrix_world.to_3x3().determinant()) <= 1e-12
     ):
-        logger.debug("Lock and key skipped: source or target transform is singular")
+        _note_lock_key_skip(diagnostics, "source or target has a flattened (singular) transform")
         return None
     depsgraph = context.evaluated_depsgraph_get()
     ignore_modifiers = getattr(settings, 'ignore_modifiers', False)
@@ -1047,7 +1059,7 @@ def compute_lock_key_transform(
     source_seeds = _seed_polygons(source_data, 'FACES', source_face_index)
     target_seeds = _seed_polygons(target_data, 'FACES', target_face_index)
     if not source_seeds or not target_seeds:
-        logger.debug("Lock and key skipped: surface face is stale")
+        _note_lock_key_skip(diagnostics, "the clicked face no longer exists; pick again")
         return None
     source_anchor = np.array(source_hit, dtype=np.float64)
     target_anchor = np.array(target_hit, dtype=np.float64)
@@ -1064,7 +1076,28 @@ def compute_lock_key_transform(
             Vector(tuple(float(value) for value in translation))
         )
     if not allow_rotation:
-        logger.debug("Lock and key skipped: no unambiguous translation-only match")
+        if not source_pairs:
+            _note_lock_key_skip(
+                diagnostics,
+                "no opposed wall pair at the key click -- click flat on a connector"
+                " wall, not a rounded or angled face")
+        elif not target_pairs:
+            _note_lock_key_skip(
+                diagnostics,
+                "no opposed wall pair at the lock click -- click flat on an inner"
+                " wall of the socket")
+        elif not matches:
+            _note_lock_key_skip(
+                diagnostics,
+                f"the {len(source_pairs)} key and {len(target_pairs)} lock wall"
+                " pairs do not correspond (opening angle, width or clearance"
+                " mismatch, or the lock is not wider than the key)")
+        else:
+            _note_lock_key_skip(
+                diagnostics,
+                f"{len(matches)} matched wall pair(s) could not be centred within"
+                " tolerance -- the two clicks may be too far apart, or enable"
+                " 'Rotate key to match lock'")
         return None
 
     valid = []
@@ -1116,14 +1149,14 @@ def compute_lock_key_transform(
                 ),
             ))
     if not valid:
-        logger.debug("Lock and key skipped: no valid rigid connector match")
+        _note_lock_key_skip(diagnostics, "no rotation seats the key without penetrating the lock")
         return None
     # Smallest-angle ranking is only legitimate between candidates that seat the
     # mated walls identically. Candidates that seat them differently are a genuine
     # ambiguity, and preferring the nearer one would silently pick an orientation
     # the geometry never justified.
     if len({item[2] for item in valid}) > 1:
-        logger.debug("Lock and key skipped: rigid candidates seat the key differently")
+        _note_lock_key_skip(diagnostics, "several rotations fit differently; too ambiguous to choose")
         return None
     valid.sort(key=lambda item: item[0])
     return valid[0][1]

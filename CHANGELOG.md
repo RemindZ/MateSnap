@@ -43,6 +43,9 @@
   there is nothing to make active, and cleanup aborted partway through.
 
 ### Changed
+- A refused mate now names its cause -- no opposed wall pair at a click,
+  mismatched wall pairs, a mate that cannot be centred, a stale face -- instead
+  of one generic "no safe connector match found" covering every failure.
 - The two clicks extract each connector mesh once instead of three times, and the
   target-side preview raycast uses the scene BVH. Staleness is still checked
   against live mesh data on every click.

@@ -905,6 +905,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 )
                 self.reset_lock_key_source()
                 return False
+        diagnostics = []
         try:
             delta = quicksnap_utils.compute_lock_key_transform(
                 context,
@@ -926,15 +927,17 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 ),
                 source_normal=source.get('normal'),
                 target_normal=hit.get('normal'),
+                diagnostics=diagnostics,
             )
         except Exception as error:
             logger.warning(f"Lock and key skipped: {error}")
+            diagnostics.append(str(error))
             delta = None
         if delta is None:
-            self.report(
-                {'WARNING'},
-                "Lock and key: no safe connector match found",
-            )
+            # Name the actual cause: one generic message for eight different
+            # failures leaves the user with nothing to try differently.
+            reason = diagnostics[-1] if diagnostics else "no safe connector match"
+            self.report({'WARNING'}, f"Lock and key: {reason}")
             return False
         self.apply_world_delta_to_selection(delta)
         return True
