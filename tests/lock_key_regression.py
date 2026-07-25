@@ -923,6 +923,37 @@ def assert_failures_report_a_specific_reason():
             )
         reasons[label] = diagnostics[-1]
 
+    # A misaligned key is the common cause of "no correspondence", and translation
+    # alone can never fix it, so the message has to point at the rotate option.
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_rotated_key_lock(
+        euler=(0.0, 0.0, math.radians(20.0))
+    )
+    diagnostics = []
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+        allow_rotation=False, diagnostics=diagnostics,
+    )
+    if delta is not None:
+        raise AssertionError("a 20 degree misaligned key should not translate-mate")
+    if "Rotate key to match lock" not in diagnostics[-1]:
+        raise AssertionError(
+            f"misalignment reason does not point at the rotate option: "
+            f"{diagnostics[-1]!r}"
+        )
+    # ...and the same geometry must actually mate once rotation is allowed,
+    # otherwise the advice is wrong.
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+        allow_rotation=True,
+    )
+    if delta is None:
+        raise AssertionError(
+            "the message advises enabling rotation, but rotation does not mate this"
+        )
+
     # An incompatible pair must not reuse a different stage's wording.
     clear_scene()
     key, key_face, key_hit, lock, lock_face, lock_hit = make_key_lock(
@@ -936,9 +967,14 @@ def assert_failures_report_a_specific_reason():
     )
     if delta is not None or not diagnostics:
         raise AssertionError("equal-width connectors should refuse with a reason")
-    if "do not correspond" not in diagnostics[-1]:
+    if "do not fit" not in diagnostics[-1]:
         raise AssertionError(
             f"equal-width reason is not specific: {diagnostics[-1]!r}"
+        )
+    if "Rotate key to match lock" in diagnostics[-1]:
+        raise AssertionError(
+            "an aligned-but-unfitting pair was wrongly blamed on rotation: "
+            f"{diagnostics[-1]!r}"
         )
     if diagnostics[-1] in reasons.values():
         raise AssertionError("distinct causes reported the same reason")

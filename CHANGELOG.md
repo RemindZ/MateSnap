@@ -43,6 +43,10 @@
   there is nothing to make active, and cleanup aborted partway through.
 
 ### Changed
+- A refused mate distinguishes a key that is not rotated into place (which the
+  "Rotate key to match lock" option fixes) from parts that face each other but
+  do not fit. Translation-only matching needs the key aligned to within about
+  five degrees, which was not stated anywhere.
 - A refused mate now names its cause -- no opposed wall pair at a click,
   mismatched wall pairs, a mate that cannot be centred, a stale face -- instead
   of one generic "no safe connector match found" covering every failure.

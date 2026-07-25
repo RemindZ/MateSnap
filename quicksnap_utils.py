@@ -1008,6 +1008,31 @@ def _connector_placement_signature(matches, translation):
     return tuple(sorted(planes))
 
 
+def _orientation_compatible_count(source_pairs, target_pairs):
+    """How many wall pairs are already facing each other, ignoring size.
+
+    Separates "the key is not rotated into place" from "the parts do not fit":
+    rotation can fix orientation, and can never fix missing clearance. Only the
+    orientation filters from _match_connector_pairs are applied here.
+    """
+    opposed_limit = math.cos(math.radians(170.0))
+    count = 0
+    for source in source_pairs:
+        for target in target_pairs:
+            if float(source['axis'] @ target['axis']) < _FIT_COS_5:
+                continue
+            if float(
+                source['low_patch']['normal'] @ target['low_patch']['normal']
+            ) > opposed_limit:
+                continue
+            if float(
+                source['high_patch']['normal'] @ target['high_patch']['normal']
+            ) > opposed_limit:
+                continue
+            count += 1
+    return count
+
+
 def _note_lock_key_skip(diagnostics, message):
     """Record why a mate was refused.
 
@@ -1087,11 +1112,24 @@ def compute_lock_key_transform(
                 "no opposed wall pair at the lock click -- click flat on an inner"
                 " wall of the socket")
         elif not matches:
-            _note_lock_key_skip(
-                diagnostics,
-                f"the {len(source_pairs)} key and {len(target_pairs)} lock wall"
-                " pairs do not correspond (opening angle, width or clearance"
-                " mismatch, or the lock is not wider than the key)")
+            # Matching needs the walls anti-parallel within 10 degrees and the
+            # lateral axes aligned within 5, so a key that is not already rotated
+            # into place can never match however well the parts actually fit.
+            # Distinguish that from parts that face each other but do not fit.
+            if _orientation_compatible_count(source_pairs, target_pairs) == 0:
+                _note_lock_key_skip(
+                    diagnostics,
+                    "the key is not aligned with the lock -- turn on 'Rotate key to"
+                    " match lock', or rotate the key roughly into place first"
+                    f" ({len(source_pairs)} key / {len(target_pairs)} lock wall"
+                    " pairs, none facing each other)")
+            else:
+                _note_lock_key_skip(
+                    diagnostics,
+                    "the key and lock walls face each other but do not fit -- the"
+                    " lock must be measurably wider than the key, with a matching"
+                    f" taper ({len(source_pairs)} key / {len(target_pairs)} lock"
+                    " wall pairs)")
         else:
             _note_lock_key_skip(
                 diagnostics,
