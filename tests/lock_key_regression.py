@@ -122,6 +122,12 @@ def make_tapered_key_lock(taper_degrees):
 
 
 def make_rotated_key_lock(euler=(0.35, -0.25, 0.5), **kwargs):
+    # The default lock is 1.2 x 1.0 and the key 1.0 x 0.8, so a 90 degree turn also
+    # seats the key exactly (1.0 into 1.0). That is a real second solution and the
+    # solver rightly refuses to choose between them, which makes the default a poor
+    # fixture for "there is one unique rotation". Narrow the lock so only the
+    # intended orientation fits.
+    kwargs.setdefault("target_half_height", 0.45)
     key, key_face, _, lock, lock_face, lock_hit = make_key_lock(**kwargs)
     key.rotation_euler = Euler(euler, 'XYZ')
     bpy.context.view_layer.update()
@@ -406,17 +412,38 @@ def assert_realistic_clearance_mates():
                     f"refused; printed parts are modelled this tightly"
                 )
 
-    # Identical widths are still no fit at all, and must still fail closed.
+    # A designer who built in no tolerance at all still gets a mate: a snug fit is
+    # a real design, and its seated position is the most determined of any.
     clear_scene()
-    key, key_face, key_hit, lock, lock_face, lock_hit = make_key_lock(
-        target_half_width=0.5, target_half_height=0.4
+    key, key_face, key_hit, lock, lock_face, lock_hit = peg_and_socket(
+        5.0, 0.0, 10.0
     )
-    if quicksnap_utils.compute_lock_key_transform(
+    delta = quicksnap_utils.compute_lock_key_transform(
         bpy.context, SimpleNamespace(ignore_modifiers=True),
         key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
         allow_rotation=False,
-    ) is not None:
-        raise AssertionError("a zero-clearance connector must still fail closed")
+    )
+    if delta is None:
+        raise AssertionError("a snug zero-clearance connector should still mate")
+    key.matrix_world = delta @ key.matrix_world
+    centre = key.matrix_world.translation
+    if abs(centre.x) > 1e-6 or abs(centre.y) > 1e-6:
+        raise AssertionError(f"snug fit was not centred: {tuple(centre)}")
+
+    # A key genuinely wider than its lock cannot be seated, and must fail closed.
+    for gap in (-0.05, -0.5):
+        clear_scene()
+        key, key_face, key_hit, lock, lock_face, lock_hit = peg_and_socket(
+            5.0, gap, 10.0
+        )
+        if quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+            allow_rotation=False,
+        ) is not None:
+            raise AssertionError(
+                f"a key wider than its lock (gap {gap}) must fail closed"
+            )
 
 
 def assert_rotation_search_is_bounded():
@@ -1017,7 +1044,7 @@ def assert_failures_report_a_specific_reason():
     # An incompatible pair must not reuse a different stage's wording.
     clear_scene()
     key, key_face, key_hit, lock, lock_face, lock_hit = make_key_lock(
-        target_half_width=0.5, target_half_height=0.4
+        target_half_width=0.4, target_half_height=0.3
     )
     diagnostics = []
     delta = quicksnap_utils.compute_lock_key_transform(
@@ -1026,10 +1053,10 @@ def assert_failures_report_a_specific_reason():
         allow_rotation=False, diagnostics=diagnostics,
     )
     if delta is not None or not diagnostics:
-        raise AssertionError("equal-width connectors should refuse with a reason")
-    if "do not fit" not in diagnostics[-1]:
+        raise AssertionError("an oversized key should refuse with a reason")
+    if "does not fit inside the lock" not in diagnostics[-1]:
         raise AssertionError(
-            f"equal-width reason is not specific: {diagnostics[-1]!r}"
+            f"oversized-key reason is not specific: {diagnostics[-1]!r}"
         )
     if "Rotate key to match lock" in diagnostics[-1]:
         raise AssertionError(
@@ -1149,8 +1176,10 @@ def main():
     assert compute_case(
         lambda: make_key_lock(taper_degrees=15.0, target_taper_degrees=5.0)
     ) is None
+    # A key wider than its lock cannot be seated. (Equal widths are a snug fit and
+    # do mate -- see assert_realistic_clearance_mates.)
     assert compute_case(
-        lambda: make_key_lock(target_half_width=0.5, target_half_height=0.4)
+        lambda: make_key_lock(target_half_width=0.4, target_half_height=0.3)
     ) is None
     assert compute_case(make_irregular_pair) is None
     assert compute_case(make_straight_key_lock, source_face=10_000) is None

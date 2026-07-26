@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.1
+
+### Fixed
+- Lock and key mates connectors that were modelled with no clearance at all. A
+  snug fit is a legitimate design and its seated position is the most determined
+  of any, but the solver demanded strictly positive clearance and refused it.
+  The approved design asks for clearance "non-negative within flatness
+  tolerance", which is what is now applied. A key genuinely wider than its lock
+  still fails closed.
+- The relocation cap no longer collapses on a snug fit. It was bounded by twice
+  the clearance, which is zero for a press fit, so no correction was permitted at
+  all. Over-sliding is already caught by the wall gap checks.
+
 ## 1.6.0 - QuickSnap Neo
 
 ### Added

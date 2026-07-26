@@ -1,4 +1,4 @@
-import importlib
+﻿import importlib
 import logging
 import sys
 from . import addon_updater_ops
@@ -7,7 +7,7 @@ bl_info = {
     "name": "QuickSnap",
     "author": "Julien Heijmans",
     "blender": (2, 93, 0),
-    'version': (1, 6, 0),
+    'version': (1, 6, 1),
     "category": "3D View",
     "description": "Quickly snap objects/vertices/curve points",
     "warning": "",

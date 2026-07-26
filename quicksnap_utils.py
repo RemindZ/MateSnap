@@ -655,7 +655,7 @@ def _match_connector_pairs(source_pairs, target_pairs):
             # flatness tolerance scales with patch size and would demand roughly 2%
             # clearance on a 10-unit peg, rejecting realistic printed fits.
             clearance = target['width'] - source['width']
-            if clearance <= source['fit_tolerance'] + target['fit_tolerance']:
+            if clearance < -(source['fit_tolerance'] + target['fit_tolerance']):
                 continue
             distance = float(np.linalg.norm(target['center'] - target['anchor']))
             candidates.append((distance, tolerance, target, clearance))
@@ -733,7 +733,7 @@ def _rotation_compatible(source, target):
     return (
         abs(source['opening_angle'] - target['opening_angle']) <= math.radians(5.0)
         and target['width'] - source['width']
-        > source['fit_tolerance'] + target['fit_tolerance']
+        >= -(source['fit_tolerance'] + target['fit_tolerance'])
     )
 
 
@@ -829,7 +829,7 @@ def _rotation_candidates(source_pairs, target_pairs, allow_mixed_anchor=False):
                 if (
                     abs(source['opening_angle'] - target['opening_angle'])
                     > math.radians(5.0)
-                    or target['width'] - source['width'] <= tolerance
+                    or target['width'] - source['width'] < -tolerance
                     or (
                         not allow_mixed_anchor
                         and bool(source['anchor_side'])
@@ -967,7 +967,11 @@ def _validate_lock_key_transform(matches, translation):
             return False
         coarse = match['target']['anchor'] - match['source']['anchor']
         correction = translation - coarse
-        cap = min(0.25 * match['source']['width'], 2.0 * match['clearance']) + tolerance
+        # Guard against relocating the part, not against using its slack: a snug fit
+        # has no slack, yet its seated position is the most determined of all, and
+        # a cap of 2*clearance would collapse to zero and reject it. Over-sliding is
+        # already caught by the gap checks above.
+        cap = 0.25 * match['source']['width'] + tolerance
         if abs(float(match['axis'] @ correction)) > cap:
             return False
     return True
@@ -1139,9 +1143,9 @@ def compute_lock_key_transform(
             else:
                 _note_lock_key_skip(
                     diagnostics,
-                    "the key and lock walls face each other but do not fit -- the"
-                    " lock must be measurably wider than the key, with a matching"
-                    f" taper ({len(source_pairs)} key / {len(target_pairs)} lock"
+                    "the key does not fit inside the lock -- the key is wider than"
+                    " the lock, or their tapers differ"
+                    f" ({len(source_pairs)} key / {len(target_pairs)} lock"
                     " wall pairs)")
         else:
             _note_lock_key_skip(
