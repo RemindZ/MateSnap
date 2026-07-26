@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - QuickSnap Neo
+## 1.6.0 - QuickSnap Neo
 
 ### Added
 - Lock and key mode provides a no-drag, two-surface-click workflow for
