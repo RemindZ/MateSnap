@@ -43,6 +43,12 @@
   there is nothing to make active, and cleanup aborted partway through.
 
 ### Changed
+- Well-fitted connectors are no longer rejected for fitting too well. Clearance
+  was judged against the flatness allowance, which scales with patch size and
+  demanded roughly 2% clearance on a 10-unit peg -- printed parts are modelled
+  at 1% or less, so real connectors were refused. Clearance is now measured
+  against how precisely the mating planes are defined. Zero-clearance and
+  ambiguous geometry still fail closed.
 - A refused mate distinguishes a key that is not rotated into place (which the
   "Rotate key to match lock" option fixes) from parts that face each other but
   do not fit. Translation-only matching needs the key aligned to within about

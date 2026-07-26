@@ -337,6 +337,14 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
                     'extent': extent,
                     'residual': residual,
                     'tolerance': tolerance,
+                    # How precisely this plane is defined, as opposed to how big it
+                    # is. 'tolerance' is a flatness allowance scaled to the patch
+                    # size and is far too coarse to judge whether a fit clearance is
+                    # real: on a 10-unit peg it demands ~2% clearance, while printed
+                    # connectors are modelled at 1% or less.
+                    'fit_tolerance': max(
+                        residual, 1e-6 * extent, _FIT_ABS_TOL
+                    ),
                 }
 
     for polygon_index in component:
@@ -583,6 +591,7 @@ def _connector_side_pairs(patches, anchor):
             crossings.sort(key=lambda item: item[0])
             (low_distance, low_patch), (high_distance, high_patch) = crossings
             tolerance = first['tolerance'] + second['tolerance']
+            fit_tolerance = first['fit_tolerance'] + second['fit_tolerance']
             width = high_distance - low_distance
             if (
                 first['area'] <= 0.0 or second['area'] <= 0.0
@@ -616,6 +625,7 @@ def _connector_side_pairs(patches, anchor):
                 'opening_angle': math.acos(np.clip(normal_dot, -1.0, 1.0)),
                 'depth_hint': depth_hint,
                 'tolerance': tolerance,
+                'fit_tolerance': fit_tolerance,
             })
     return sorted(
         pairs,
@@ -641,8 +651,11 @@ def _match_connector_pairs(source_pairs, target_pairs):
             if float(source['high_patch']['normal'] @ target['high_patch']['normal']) > opposed_limit:
                 continue
             tolerance = source['tolerance'] + target['tolerance']
+            # Judge clearance against how precisely the planes are defined. The
+            # flatness tolerance scales with patch size and would demand roughly 2%
+            # clearance on a 10-unit peg, rejecting realistic printed fits.
             clearance = target['width'] - source['width']
-            if clearance <= tolerance:
+            if clearance <= source['fit_tolerance'] + target['fit_tolerance']:
                 continue
             distance = float(np.linalg.norm(target['center'] - target['anchor']))
             candidates.append((distance, tolerance, target, clearance))
@@ -717,10 +730,10 @@ _ROTATION_MAX_PAIRS = 8
 
 def _rotation_compatible(source, target):
     """Could this source/target mapping ever fit? Rotation-invariant tests only."""
-    tolerance = source['tolerance'] + target['tolerance']
     return (
         abs(source['opening_angle'] - target['opening_angle']) <= math.radians(5.0)
-        and target['width'] - source['width'] > tolerance
+        and target['width'] - source['width']
+        > source['fit_tolerance'] + target['fit_tolerance']
     )
 
 
@@ -812,7 +825,7 @@ def _rotation_candidates(source_pairs, target_pairs, allow_mixed_anchor=False):
                 continue
             swap_options = []
             for source, target in zip(sources, targets):
-                tolerance = source['tolerance'] + target['tolerance']
+                tolerance = source['fit_tolerance'] + target['fit_tolerance']
                 if (
                     abs(source['opening_angle'] - target['opening_angle'])
                     > math.radians(5.0)

@@ -359,6 +359,66 @@ def count_rotation_fits(callable_under_test):
     return result, len(calls)
 
 
+def assert_realistic_clearance_mates():
+    """Printed connectors are modelled with about 1% clearance, sometimes less.
+
+    The clearance test used to run against the flatness tolerance, which scales
+    with patch size and demanded roughly 2% on a 10-unit peg -- so well-modelled
+    parts were refused for being too well fitted. Clearance is judged against how
+    precisely the planes are defined instead.
+    """
+    def peg_and_socket(half, gap, depth):
+        """Everything scales together, including where the user clicks."""
+        key = make_mesh(
+            "Key",
+            [(-half,-half,-depth),(half,-half,-depth),(half,half,-depth),(-half,half,-depth),
+             (-half,-half,0.0),(half,-half,0.0),(half,half,0.0),(-half,half,0.0)],
+            [(0,3,2,1),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)],
+        )
+        outer = half + gap
+        lock = make_mesh(
+            "Lock",
+            [(-outer,-outer,0.0),(outer,-outer,0.0),(outer,outer,0.0),(-outer,outer,0.0),
+             (-outer,-outer,-depth*1.2),(outer,-outer,-depth*1.2),
+             (outer,outer,-depth*1.2),(-outer,outer,-depth*1.2)],
+            [(1,5,4,0),(2,6,5,1),(3,7,6,2),(0,4,7,3)],
+        )
+        key.location = (half * 8.0, 0.0, 0.0)
+        bpy.context.view_layer.update()
+        return (key, 5, key.matrix_world @ Vector((-half, 0.0, -depth * 0.3)),
+                lock, 3, lock.matrix_world @ Vector((-outer, 0.0, -depth * 0.4)))
+
+    for gap_ratio in (0.05, 0.02, 0.01, 0.005, 0.002):
+        for scale in (0.1, 1.0, 100.0):
+            clear_scene()
+            half = 0.5 * scale
+            key, key_face, key_hit, lock, lock_face, lock_hit = peg_and_socket(
+                half, half * gap_ratio, scale
+            )
+            delta = quicksnap_utils.compute_lock_key_transform(
+                bpy.context, SimpleNamespace(ignore_modifiers=True),
+                key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+                allow_rotation=False,
+            )
+            if delta is None:
+                raise AssertionError(
+                    f"a {gap_ratio:.1%} clearance connector at scale {scale} was "
+                    f"refused; printed parts are modelled this tightly"
+                )
+
+    # Identical widths are still no fit at all, and must still fail closed.
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_key_lock(
+        target_half_width=0.5, target_half_height=0.4
+    )
+    if quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+        allow_rotation=False,
+    ) is not None:
+        raise AssertionError("a zero-clearance connector must still fail closed")
+
+
 def assert_rotation_search_is_bounded():
     """The rotation enumeration is quadratic in each pair list.
 
@@ -1112,6 +1172,8 @@ def main():
     print("raw/evaluated picking path: PASS")
     assert_non_uniform_transform_mate()
     print("non-uniform transform: PASS")
+    assert_realistic_clearance_mates()
+    print("realistic print clearances: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()
