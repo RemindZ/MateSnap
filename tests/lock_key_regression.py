@@ -1420,7 +1420,7 @@ def assert_filleted_connectors_mate():
         key_data = quicksnap_utils._mesh_fit_data(key)
         seeds = quicksnap_utils._seed_polygons(key_data, 'FACES', key_face)
         clicked = quicksnap_utils._grow_planar_patch(key_data, key_face)
-        pairs = quicksnap_utils._connector_pairs(
+        pairs, _ = quicksnap_utils._connector_pairs(
             key_data, seeds, np.array(key_hit, dtype=np.float64)
         )
         if not pairs:

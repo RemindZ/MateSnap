@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.7.3
+
+### Fixed
+- Ignoring trim is now a preference rather than a rule. The area floor added in
+  1.7.2 is tried first and dropped if it leaves the click with nothing, so a
+  connector whose far wall is genuinely much smaller than the clicked one -- or
+  whose clicked patch merged with a large coplanar body face, inflating the floor
+  -- is no longer refused for the sake of a filter that exists only to keep bevel
+  slivers out. A tab flush with a body plate mates again.
+
+### Changed
+- "No opposed wall pair" now reports what the click actually found: how many flat
+  patches were within reach, how many face the clicked wall, and how many were
+  rejected for a shallow angle or for not spanning the click. The shapes that
+  reach this message are the ones nobody can picture from a description, so the
+  refusal now carries its own evidence.
+- A click on a curved surface says so, instead of claiming no opposed wall pair
+  was found. It had in fact found hundreds -- a 32-sided cylinder yields 273 --
+  which is what identifies it as a curve.
+
 ## 1.7.2
 
 ### Fixed

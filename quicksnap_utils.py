@@ -687,8 +687,11 @@ _CONNECTOR_MIN_WALL_FRACTION = 0.1
 _CONNECTOR_MAX_WALL_PAIRS = 32
 
 
-def _connector_pairs(mesh_data, seeds, anchor):
+def _connector_pairs(mesh_data, seeds, anchor, label='key'):
     """Opposed wall pairs at a click, widening the search only when it finds none.
+
+    Returns `(pairs, reason)`; `reason` is a specific refusal when there is one to
+    give, and None when the caller should describe the empty result itself.
 
     Widening costs patches quadratically, so stop at the first radius that sees any
     opposed pair: that is the tightest neighbourhood which still describes the
@@ -697,30 +700,89 @@ def _connector_pairs(mesh_data, seeds, anchor):
     a stepping stone to the far wall without becoming a wall itself.
     """
     clicked = _grow_planar_patch(mesh_data, int(seeds[0])) if seeds else None
-    floor = (
-        0.0 if clicked is None
-        else _CONNECTOR_MIN_WALL_FRACTION * float(clicked['area'])
-    )
-    for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
-        reached = _candidate_patches(mesh_data, seeds, hops)
-        pairs = _connector_side_pairs(
-            [patch for patch in reached if float(patch['area']) >= floor], anchor
-        )
-        if len(pairs) > _CONNECTOR_MAX_WALL_PAIRS:
-            logger.debug(
-                f"Lock and key stopped widening at {hops} hops: {len(pairs)} opposed"
-                f" pairs is a curve, not a flat-sided connector"
+    area = 0.0 if clicked is None else float(clicked['area'])
+    # Ignoring trim is a preference, not a rule. A connector whose far wall really is
+    # much smaller than the clicked one -- or whose clicked patch merged with a large
+    # coplanar body face, inflating the floor -- would otherwise be refused outright
+    # for the sake of a filter that exists only to keep bevel slivers out.
+    for fraction in (_CONNECTOR_MIN_WALL_FRACTION, 0.0):
+        floor = fraction * area
+        for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
+            reached = _candidate_patches(mesh_data, seeds, hops)
+            pairs = _connector_side_pairs(
+                [patch for patch in reached if float(patch['area']) >= floor],
+                anchor,
             )
-            return []
-        if pairs:
-            return pairs
-        if len(reached) >= _CONNECTOR_MAX_PATCHES:
-            logger.debug(
-                f"Lock and key stopped widening at {hops} hops:"
-                f" {len(reached)} patches and still no opposed wall pair"
-            )
+            if len(pairs) > _CONNECTOR_MAX_WALL_PAIRS:
+                return [], (
+                    f"the {label} click is on a curved surface -- it offers"
+                    f" {len(pairs)} opposed wall pairs where a flat-sided connector"
+                    " has a handful, and rounded connectors are not supported"
+                )
+            if pairs:
+                return pairs, None
+            if len(reached) >= _CONNECTOR_MAX_PATCHES:
+                logger.debug(
+                    f"Lock and key stopped widening at {hops} hops:"
+                    f" {len(reached)} patches and still no opposed wall pair"
+                )
+                break
+        if floor <= 0.0:
             break
-    return []
+    return [], None
+
+
+def _describe_missing_wall_pair(mesh_data, seeds, anchor):
+    """Say what the click did find, so a refusal is diagnosable rather than flat.
+
+    "No opposed wall pair" covers every way the search can come up empty, and the
+    shapes that reach it are exactly the ones nobody can picture from a description.
+    Counting where the candidates fell out turns the next report into evidence.
+    Only ever runs on the failure path.
+    """
+    clicked = _grow_planar_patch(mesh_data, int(seeds[0])) if seeds else None
+    if clicked is None:
+        return "the clicked face is not part of a flat patch"
+    anchor = np.array(anchor, dtype=np.float64)
+    patches = _candidate_patches(mesh_data, seeds, _CONNECTOR_MAX_HOPS)
+    facing = skewed = behind = 0
+    for patch in patches:
+        if patch['id'] == clicked['id']:
+            continue
+        if float(patch['normal'] @ clicked['normal']) >= 0.0:
+            continue
+        facing += 1
+        lateral = clicked['normal'] - patch['normal']
+        length = float(np.linalg.norm(lateral))
+        if length <= 1e-12:
+            continue
+        lateral /= length
+        # Canonicalise exactly as _connector_side_pairs does, or the sign of the
+        # crossing distance flips and this reports the opposite of what happened.
+        dominant = int(np.argmax(np.abs(lateral)))
+        if lateral[dominant] < 0:
+            lateral *= -1.0
+        denominator = float(patch['normal'] @ lateral)
+        if abs(float(clicked['normal'] @ lateral)) < 0.5 or abs(denominator) < 0.5:
+            skewed += 1
+            continue
+        clicked_denominator = float(clicked['normal'] @ lateral)
+        near = float(
+            clicked['normal'] @ (clicked['point'] - anchor)
+        ) / clicked_denominator
+        far = float(patch['normal'] @ (patch['point'] - anchor)) / denominator
+        if min(near, far) > 0.0 or max(near, far) < 0.0:
+            behind += 1
+    parts = [f"{len(patches)} flat patches in reach"]
+    if not facing:
+        parts.append("none facing the clicked wall")
+    else:
+        parts.append(f"{facing} facing it")
+        if skewed:
+            parts.append(f"{skewed} at too shallow an angle")
+        if behind:
+            parts.append(f"{behind} on the wrong side of the click")
+    return ", ".join(parts)
 
 
 def _pair_is_female(pair):
@@ -1246,8 +1308,12 @@ def compute_lock_key_transform(
         return None
     source_anchor = np.array(source_hit, dtype=np.float64)
     target_anchor = np.array(target_hit, dtype=np.float64)
-    source_pairs = _connector_pairs(source_data, source_seeds, source_anchor)
-    target_pairs = _connector_pairs(target_data, target_seeds, target_anchor)
+    source_pairs, source_reason = _connector_pairs(
+        source_data, source_seeds, source_anchor, 'key'
+    )
+    target_pairs, target_reason = _connector_pairs(
+        target_data, target_seeds, target_anchor, 'lock'
+    )
     matches = _match_connector_pairs(source_pairs, target_pairs)
     translation = _solve_lock_key_translation(matches, source_anchor, target_anchor)
     if translation is not None and _validate_lock_key_transform(matches, translation):
@@ -1258,13 +1324,21 @@ def compute_lock_key_transform(
         if not source_pairs:
             _note_lock_key_skip(
                 diagnostics,
-                "no opposed wall pair at the key click -- click flat on a connector"
-                " wall, not a rounded or angled face")
+                source_reason or (
+                    "no opposed wall pair at the key click -- click flat on a"
+                    " connector wall, not a rounded or angled face ("
+                    + _describe_missing_wall_pair(
+                        source_data, source_seeds, source_anchor)
+                    + ")"))
         elif not target_pairs:
             _note_lock_key_skip(
                 diagnostics,
-                "no opposed wall pair at the lock click -- click flat on an inner"
-                " wall of the socket")
+                target_reason or (
+                    "no opposed wall pair at the lock click -- click flat on an"
+                    " inner wall of the socket ("
+                    + _describe_missing_wall_pair(
+                        target_data, target_seeds, target_anchor)
+                    + ")"))
         elif not matches:
             # Matching needs the walls anti-parallel within 10 degrees and the
             # lateral axes aligned within 5, so a key that is not already rotated
