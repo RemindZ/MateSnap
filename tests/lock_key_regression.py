@@ -199,6 +199,7 @@ LOCK_KEY_OPERATOR_METHODS = (
     "lock_key_centre_hit",
     "record_lock_key_source",
     "apply_world_delta_to_selection",
+    "log_lock_key_refusal",
     "finish_lock_key",
 )
 

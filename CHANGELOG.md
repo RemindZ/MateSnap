@@ -12,10 +12,11 @@
   where the facing wall is genuinely further away than a connector should be.
 
 ### Added
-- `tools/lock_key_report.py` reports what the solver sees at your own two clicks:
-  patches reached, walls recovered, which walls face the click and by how much,
-  and the pairs that survive. Run it in Blender on a pair that refuses, and paste
-  the result -- refusal text alone has repeatedly pointed at the wrong cause.
+- A refused mate now writes the full geometry behind it to the console: patches
+  reached, walls recovered, which walls face the click and by how much, the
+  separations, and every surviving wall pair. Nothing to run and nothing to
+  reproduce -- open the system console and it is there. The status bar holds one
+  line, and one line has repeatedly turned out to describe the wrong thing.
 
 ## 1.8.0
 

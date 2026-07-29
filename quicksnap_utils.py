@@ -1418,6 +1418,83 @@ def _orientation_compatible_pairs(source_pairs, target_pairs):
     return facing
 
 
+def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
+    """Every geometric fact behind a refused mate, as lines for the console.
+
+    A refusal has one line of room in the status bar, and the shapes that reach it
+    cannot be pictured from one line -- several rounds of this feature were
+    diagnosed from summaries that turned out to describe the wrong thing. Writing
+    the full picture on every refusal costs nothing on the success path and means
+    a report never has to be reproduced by hand.
+    """
+    lines = []
+
+    def say(message):
+        lines.append(f"    {message}")
+
+    lines.append(f"  {label}:")
+    if mesh_data is None:
+        say("no mesh data (object missing, not a mesh, or extraction failed)")
+        return lines
+    index = int(face_index)
+    if index < 0 or index >= len(mesh_data['polygon_normals']):
+        say(f"face {index} is out of range; the mesh changed since the click")
+        return lines
+
+    seeds = _seed_polygons(mesh_data, 'FACES', index)
+    anchor = np.array(anchor, dtype=np.float64)
+    say(f"clicked face {index}, anchor "
+        f"{tuple(round(float(value), 5) for value in anchor)}")
+    try:
+        raw = _candidate_patches(mesh_data, seeds, _CONNECTOR_MAX_HOPS)
+        walls, clicked = _connector_walls(mesh_data, seeds, _CONNECTOR_MAX_HOPS)
+    except Exception as error:
+        say(f"patch extraction failed: {error}")
+        return lines
+    say(f"at full depth: {len(raw)} raw patches -> {len(walls)} merged walls")
+    if clicked is None:
+        say("the clicked face did not land in any merged wall")
+        return lines
+    say(f"clicked wall: area {clicked['area']:.6f} extent {clicked['extent']:.6f}"
+        f" normal {tuple(round(float(v), 4) for v in clicked['normal'])}")
+
+    facing = [
+        wall for wall in walls
+        if wall['id'] != clicked['id']
+        and float(wall['normal'] @ clicked['normal']) < 0.0
+    ]
+    opposed = [
+        wall for wall in facing
+        if float(wall['normal'] @ clicked['normal']) < _WALL_MAX_OPPOSED_DOT
+    ]
+    say(f"{len(facing)} wall(s) face it at all, {len(opposed)} past the"
+        f" {math.degrees(_WALL_MIN_OPENING):.0f}-degree bar")
+    for wall in sorted(facing, key=lambda item: -float(item['area']))[:6]:
+        opening = math.degrees(math.acos(
+            float(np.clip(wall['normal'] @ clicked['normal'], -1.0, 1.0))
+        ))
+        separation = abs(float(
+            clicked['normal'] @ (wall['point'] - clicked['point'])
+        ))
+        say(f"    facing wall area {wall['area']:10.5f} opening {opening:7.2f}deg"
+            f" separation {separation:.6f}")
+    say("largest walls in reach:")
+    for wall in sorted(walls, key=lambda item: -float(item['area']))[:6]:
+        say(f"    area {wall['area']:10.5f}"
+            f" normal {tuple(round(float(v), 4) for v in wall['normal'])}")
+
+    pairs, reason = _connector_pairs(mesh_data, seeds, anchor, label.lower())
+    say(f"opposed wall pairs: {len(pairs)}")
+    for pair in pairs[:6]:
+        say(f"    axis {tuple(round(float(v), 4) for v in pair['axis'])}"
+            f" width {pair['width']:.6f}"
+            f" opening {math.degrees(pair['opening_angle']):.2f}deg"
+            f" anchor_side {pair['anchor_side']}")
+    if reason:
+        say(f"refused: {reason}")
+    return lines
+
+
 def _note_lock_key_skip(diagnostics, message):
     """Record why a mate was refused.
 

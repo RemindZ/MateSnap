@@ -986,9 +986,43 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             # failures leaves the user with nothing to try differently.
             reason = diagnostics[-1] if diagnostics else "no safe connector match"
             self.report({'WARNING'}, f"Lock and key: {reason}")
+            self.log_lock_key_refusal(context, source, hit, reason)
             return False
         self.apply_world_delta_to_selection(delta)
         return True
+
+    def log_lock_key_refusal(self, context, source, target, reason):
+        """Print the whole geometric picture behind a refusal to the console.
+
+        The status bar holds one line, and one line has repeatedly turned out to
+        describe the wrong thing. This runs only when a mate is refused, so it
+        costs nothing in normal use, and it means a refusal can be diagnosed by
+        pasting the console rather than by reproducing the part.
+        """
+        try:
+            lines = [
+                "Lock and key refused a mate. Geometry at the two clicks:",
+                f"  reason: {reason}",
+                f"  rotation: "
+                f"{'on' if getattr(self.settings, 'lock_and_key_rotate', False) else 'off'}"
+                f", ignore modifiers: {self.settings.ignore_modifiers}"
+                f", centre picks: "
+                f"{getattr(self.settings, 'lock_and_key_centre_picks', True)}",
+            ]
+            for hit, label in ((source, "KEY"), (target, "LOCK")):
+                if hit is None:
+                    lines.append(f"  {label}: no hit recorded")
+                    continue
+                lines.extend(quicksnap_utils.lock_key_diagnostic_report(
+                    self.lock_key_mesh_data(context, hit['object_name']),
+                    int(hit['face_index']),
+                    hit['location'],
+                    f"{label} ({hit['object_name']})",
+                ))
+            logger.warning("\n".join(lines))
+        except Exception as error:
+            # A diagnostic must never be the thing that breaks the modal.
+            logger.debug(f"Lock and key: could not build the refusal report: {error}")
 
     def reset_lock_key_source(self):
         """Drop the recorded source so the user can genuinely pick it again."""
