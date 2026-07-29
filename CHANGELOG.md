@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.1
+
+### Fixed
+- A refusal described the wrong search. Two passes run -- one that ignores trim and
+  a fallback that does not -- and the fallback's numbers overwrote the first's, so
+  the message reported a neighbourhood assembled under different rules from the
+  search that actually failed, and cited a patch budget that no longer constrains
+  the pass being described. It now reports the pass whose failure caused the
+  refusal, and says when that search reached its full depth, which is the case
+  where the facing wall is genuinely further away than a connector should be.
+
+### Added
+- `tools/lock_key_report.py` reports what the solver sees at your own two clicks:
+  patches reached, walls recovered, which walls face the click and by how much,
+  and the pairs that survive. Run it in Blender on a pair that refuses, and paste
+  the result -- refusal text alone has repeatedly pointed at the wrong cause.
+
 ## 1.8.0
 
 ### Added

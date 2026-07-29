@@ -827,7 +827,12 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
             walls = [
                 patch for patch in reached if float(patch['area']) >= floor
             ]
-            searched = (hops, len(reached), False)
+            # Record the floored pass only. The fallback runs afterwards and used to
+            # overwrite this, so the refusal described a neighbourhood assembled
+            # under different rules from the search that actually failed -- and
+            # reported a budget that no longer constrains the pass being described.
+            if fraction > 0.0:
+                searched = (hops, len(reached), False)
             pairs = _connector_side_pairs(walls, anchor)
             if len(pairs) > _CONNECTOR_MAX_WALL_PAIRS:
                 # Only the floored pass can call something a curve. The fallback
@@ -851,7 +856,6 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
             # before it could cross to the far wall, on exactly the dense parts that
             # need the reach most.
             if fraction <= 0.0 and len(reached) >= _CONNECTOR_MAX_PATCHES:
-                searched = (hops, len(reached), True)
                 break
         if fraction <= 0.0:
             break
@@ -877,7 +881,7 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label='key')
     allowed. Describing the wider one reports geometry that was never considered,
     which reads as evidence and is not. Only ever runs on the failure path.
     """
-    hops, total, budget_stopped = searched
+    hops, _total, _unused = searched
     # Describe the merged walls, since those are what pairing was given. Counting
     # raw fragments would describe a neighbourhood the solver never saw.
     patches, clicked = _connector_walls(mesh_data, seeds, hops)
@@ -930,10 +934,11 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label='key')
             parts.append(f"{skewed} at too shallow an angle")
         if behind:
             parts.append(f"{behind} not spanning the click")
-    if budget_stopped:
+    if hops >= _CONNECTOR_MAX_HOPS:
         parts.append(
-            f"the walk stopped on its {total}-patch budget, so the far wall may"
-            " simply be further out than it looked"
+            "the walk reached its full depth, so the facing wall is further from"
+            " this click than the connector should be -- try clicking nearer the"
+            " opening, or on the opposite wall"
         )
     # A flat wall broken into dozens of slivers by triangulation or a boolean reads
     # exactly like a curve to the pairing rules, and the two need different fixes.
