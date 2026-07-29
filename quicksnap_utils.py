@@ -714,11 +714,18 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                 anchor,
             )
             if len(pairs) > _CONNECTOR_MAX_WALL_PAIRS:
-                return [], (
-                    f"the {label} click is on a curved surface -- it offers"
-                    f" {len(pairs)} opposed wall pairs where a flat-sided connector"
-                    " has a handful, and rounded connectors are not supported"
-                )
+                # Only the floored pass can call something a curve. The fallback
+                # below re-admits every sliver, so its pair count measures how
+                # finely the part is cut up, not how round it is -- claiming a
+                # curve from that number would be a confident wrong answer.
+                if floor > 0.0:
+                    return [], (
+                        f"the {label} click is on a curved surface -- it offers"
+                        f" {len(pairs)} opposed wall pairs where a flat-sided"
+                        " connector has a handful, and rounded connectors are not"
+                        " supported"
+                    )
+                break
             if pairs:
                 return pairs, None
             if len(reached) >= _CONNECTOR_MAX_PATCHES:
@@ -773,7 +780,15 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor):
         far = float(patch['normal'] @ (patch['point'] - anchor)) / denominator
         if min(near, far) > 0.0 or max(near, far) < 0.0:
             behind += 1
-    parts = [f"{len(patches)} flat patches in reach"]
+    substantial = sum(
+        1 for patch in patches
+        if float(patch['area']) >= _CONNECTOR_MIN_WALL_FRACTION
+        * float(clicked['area'])
+    )
+    parts = [
+        f"{len(patches)} flat patches in reach, {substantial} of them a tenth the"
+        f" clicked wall or bigger"
+    ]
     if not facing:
         parts.append("none facing the clicked wall")
     else:
@@ -781,7 +796,14 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor):
         if skewed:
             parts.append(f"{skewed} at too shallow an angle")
         if behind:
-            parts.append(f"{behind} on the wrong side of the click")
+            parts.append(f"{behind} not spanning the click")
+    # A flat wall broken into dozens of slivers by triangulation or a boolean reads
+    # exactly like a curve to the pairing rules, and the two need different fixes.
+    if len(patches) >= 12 and substantial <= 2:
+        parts.append(
+            "the wall may be fragmented rather than flat -- try Ignore modifiers, or"
+            " merge coplanar faces on the connector"
+        )
     return ", ".join(parts)
 
 

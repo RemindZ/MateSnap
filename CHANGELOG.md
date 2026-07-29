@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.7.4
+
+### Fixed
+- Only the floored search may call a connector curved. The unfloored fallback
+  added in 1.7.3 re-admits every bevel sliver, so its pair count measures how
+  finely the part is cut up rather than how round it is -- and a flat-sided key
+  whose walls are fragmented was confidently reported as "on a curved surface".
+  It now falls through to the descriptive refusal instead.
+
+### Changed
+- The descriptive refusal reports how many of the patches in reach are a tenth
+  the clicked wall or bigger, and says outright when a wall looks fragmented
+  rather than flat. Triangulated, decimated and booleaned parts break a flat wall
+  into slivers that read exactly like a curve to the pairing rules, and the two
+  need different fixes.
+
 ## 1.7.3
 
 ### Fixed
