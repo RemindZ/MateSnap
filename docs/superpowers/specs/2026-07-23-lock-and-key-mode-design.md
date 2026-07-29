@@ -83,6 +83,8 @@ Form a connector side pair when:
 - the clicked point projects within the pair's lateral interval plus flatness tolerance;
 - neither patch has zero area or extent.
 
+Amended 2026-07-29: whether the two walls are measurably apart is judged against the precision tolerance, not the flatness allowance. The allowance is 0.5% of a patch's extent, so on a broad thin tab it exceeds the tab's own thickness and discards the thin-axis pair -- the one axis such a connector needs centred. The mate then still succeeds on the remaining axes and silently leaves the part uncentred, which is worse than refusing. Flatness still governs the questions it belongs to: whether the click lies within the pair's lateral interval, and how far a wall may sit off its plane.
+
 Store the canonical lateral direction, pair opening angle, plane/centroid geometry, area, extent, and patch IDs. The normal sum is a depth-axis hint for tapered pairs; for straight pairs it may be zero.
 
 Match source pairs to target pairs by opening angle, lateral width, patch adjacency, extent, and face-normal opposition. Clearance must be non-negative within flatness tolerance. Tied or incompatible candidates are discarded rather than resolved by polygon IDs.

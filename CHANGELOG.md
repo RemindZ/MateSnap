@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.5
+
+### Fixed
+- Broad thin connectors keep their thin axis. Whether two walls are measurably
+  apart was judged against the flatness allowance, which is 0.5% of the patch
+  extent -- so on a tab broader than roughly 150:1 the allowance exceeds the tab's
+  own thickness and the thin-axis wall pair was discarded as noise. That is the
+  one axis such a connector needs centred. Worse than a refusal, the mate then
+  still succeeded on the remaining axes and left the part silently uncentred; a
+  600:1 tab was judged against a tolerance of 1.206 for a 0.200 thickness. The
+  question is now asked of the precision tolerance instead. Flatness still governs
+  what it should: whether the click lies within the pair's lateral interval.
+
 ## 1.7.4
 
 ### Fixed

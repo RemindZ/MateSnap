@@ -1483,6 +1483,91 @@ def assert_filleted_connectors_mate():
         )
 
 
+def make_tab_and_slot(thickness, width, height=12.0, clearance=1.12):
+    """A broad thin tab and the channel it slides into.
+
+    The shape that exposes the difference between a flatness allowance and a fit
+    tolerance: 0.5% of the tab's width dwarfs the tab's own thickness.
+    """
+    # A closed box: bottom ring first, so face 5 is its outward-facing -X wall.
+    tx, ty = thickness * 0.5, width * 0.5
+    tab = make_mesh(
+        "Key",
+        [(-tx, -ty, -height), (tx, -ty, -height),
+         (tx, ty, -height), (-tx, ty, -height),
+         (-tx, -ty, 0.0), (tx, -ty, 0.0), (tx, ty, 0.0), (-tx, ty, 0.0)],
+        [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+         (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)],
+    )
+    tab.location = (width * 1.5, 0.0, 0.0)
+    # An open channel: top ring first, so face 3 is its inward-facing -X wall. The
+    # ring order and the winding travel together -- swap one and the walls face out.
+    sx, sy, sz = thickness * clearance * 0.5, width * 0.51, height * 1.2
+    slot = make_mesh(
+        "Lock",
+        [(-sx, -sy, 0.0), (sx, -sy, 0.0), (sx, sy, 0.0), (-sx, sy, 0.0),
+         (-sx, -sy, -sz), (sx, -sy, -sz), (sx, sy, -sz), (-sx, sy, -sz)],
+        [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3)],
+    )
+    bpy.context.view_layer.update()
+    return (
+        tab, 5, tab.matrix_world @ Vector((-thickness * 0.5, 0.0, -height * 0.35)),
+        slot, 3,
+        slot.matrix_world @ Vector(
+            (-thickness * clearance * 0.5, 0.0, -height * 0.4)
+        ),
+    )
+
+
+def assert_thin_tabs_keep_their_thin_axis():
+    """A broad thin tab must still be centred across its thickness.
+
+    Whether a wall separation is real is a question about precision, not about how
+    big the patch is. Judging it with the flatness allowance -- 0.5% of the patch
+    extent -- discards the thin axis of any tab broader than roughly 150:1, which is
+    the one axis such a connector actually needs centred. The mate then still
+    "succeeds" on the remaining axes, silently leaving the tab uncentred.
+    """
+    settings = SimpleNamespace(ignore_modifiers=True)
+    for thickness, width in ((2.0, 10.0), (0.4, 60.0), (0.2, 120.0)):
+        clear_scene()
+        tab, tab_face, tab_hit, slot, slot_face, slot_hit = make_tab_and_slot(
+            thickness, width
+        )
+        tab_data = quicksnap_utils._mesh_fit_data(tab)
+        pairs, _ = quicksnap_utils._connector_pairs(
+            tab_data,
+            quicksnap_utils._seed_polygons(tab_data, 'FACES', tab_face),
+            np.array(tab_hit, dtype=np.float64),
+        )
+        if not any(abs(float(pair['axis'][0])) > 0.99 for pair in pairs):
+            raise AssertionError(
+                f"a {width / thickness:.0f}:1 tab lost its thin-axis wall pair;"
+                " the flatness allowance is being used to judge a fit"
+            )
+
+        before = tab.matrix_world.translation.x
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, settings,
+            tab.name, tab_face, tab_hit, slot.name, slot_face, slot_hit,
+            allow_rotation=False, diagnostics=diagnostics,
+        )
+        if delta is None:
+            raise AssertionError(
+                f"a {width / thickness:.0f}:1 tab was refused: "
+                f"{diagnostics[-1] if diagnostics else 'no reason given'}"
+            )
+        # Centred across the thickness means landing on the slot's mid-plane, which
+        # sits at x = 0. Anything else means the thin pair was found but not used.
+        landed = before + delta.translation.x
+        if abs(landed) > 0.02 * thickness:
+            raise AssertionError(
+                f"a {width / thickness:.0f}:1 tab seated at x={landed:.5f} rather"
+                f" than centred on the slot"
+            )
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1524,6 +1609,8 @@ def main():
     print("picks centre on their wall: PASS")
     assert_filleted_connectors_mate()
     print("filleted connectors mate: PASS")
+    assert_thin_tabs_keep_their_thin_axis()
+    print("thin tabs keep their thin axis: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

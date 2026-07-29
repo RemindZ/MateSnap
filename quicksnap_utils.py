@@ -601,7 +601,12 @@ def _connector_side_pairs(patches, anchor):
             if (
                 first['area'] <= 0.0 or second['area'] <= 0.0
                 or first['extent'] <= 0.0 or second['extent'] <= 0.0
-                or width <= tolerance
+                # Whether a wall separation is real is a question about precision,
+                # not about patch size. The flatness allowance is 0.5% of a patch's
+                # extent, so on a broad thin tab it exceeds the tab's own thickness
+                # and throws away the one pair that matters -- the thin axis is
+                # exactly the axis such a connector needs centred.
+                or width <= fit_tolerance
                 or low_distance > tolerance or high_distance < -tolerance
             ):
                 continue
