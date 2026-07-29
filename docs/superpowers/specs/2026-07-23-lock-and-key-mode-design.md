@@ -7,6 +7,8 @@ Status: Approved
 
 Add a figurine-oriented two-click workflow to QuickSnap. A selected key part remains stationary while the user marks its connector, then a second click inside an unselected lock connector applies one safe, atomic mate transform.
 
+"Key" and "lock" name the two clicks, not the two shapes: the first click is always on the moving selection and the second on the stationary part. Either may carry the peg or the socket -- see the matching rule below.
+
 This is a separate workflow, not another source/target element type. Standard vertex, midpoint, face-center, and origin snapping remain unchanged.
 
 ## Interaction
@@ -53,6 +55,8 @@ Reuse the existing deterministic helpers:
 
 The clicked patch plus the existing two patch-boundary hops define the local connector. This lets a click on a connector side, tip, or nearby rim reach its other walls without searching the whole object.
 
+Amended 2026-07-29: two hops is the starting radius, not a fixed one. Lock and key widens to at most four when a click yields no opposed wall pair at all, and stops at the first radius that yields one. Two hops reaches the far wall of a plain box peg, but every chamfer or fillet ring around an edge inserts another hop, so a well-modelled connector -- the common case in a real kit -- put its opposite wall permanently out of reach and reported that the click had landed on nothing. Widening costs patches quadratically, so it is only ever done to escape an empty result, and plain connectors keep the exact patch set and cost they had. Standard precision fit is unaffected and stays at two hops.
+
 ### Supported shapes
 
 - rectangular/prismatic pegs and sockets;
@@ -75,7 +79,9 @@ Form a connector side pair when:
 
 Store the canonical lateral direction, pair opening angle, plane/centroid geometry, area, extent, and patch IDs. The normal sum is a depth-axis hint for tapered pairs; for straight pairs it may be zero.
 
-Match source pairs to target pairs by opening angle, lateral width, patch adjacency, extent, and face-normal opposition. Target clearance must be non-negative within flatness tolerance. Tied or incompatible candidates are discarded rather than resolved by polygon IDs.
+Match source pairs to target pairs by opening angle, lateral width, patch adjacency, extent, and face-normal opposition. Clearance must be non-negative within flatness tolerance. Tied or incompatible candidates are discarded rather than resolved by polygon IDs.
+
+Which half of a matched pairing is the socket is read from the wall normals -- walls that face each other are a socket, walls that face outward are a peg -- and never from click order. Clearance is then measured as socket width minus peg width in either direction, and a pairing of two pegs or two sockets is rejected outright, since no rotation can seat it. Amended 2026-07-27: the original wording tied the socket role to the target click, which made an assembly buildable only by moving the peg. Kits exist whose parts can only be positioned by moving the socket half onto a fixed peg; both orders describe the same seated result, so both must mate and their deltas must be inverses. The insertion-axis guard follows the same rule: it reads its half-space from whichever click landed on the socket.
 
 ## Transform solve
 
@@ -86,6 +92,8 @@ Match source pairs to target pairs by opening angle, lateral width, patch adjace
 3. For each matched side pair, balance the two signed wall clearances. The difference of the paired target normals defines the centering equation, which cancels the common depth component of symmetric tapered walls.
 4. Solve only the retained lateral row space using the existing relative SVD cutoff (`0.1`). Unobserved directions remain zero.
 5. Add the lateral correction to the coarse translation. The click-defined insertion depth is unchanged.
+
+Amended 2026-07-29: each click is first moved to the area-weighted centroid of the flat patch it landed on, under a `lock_and_key_centre_picks` preference defaulting to on. The anchor only moves inside its own plane, so no measured wall width changes and step 5 still holds -- what changes is that "click-defined" now means "defined by which wall was clicked" rather than "by where on it". Two clicks far apart on a constrained axis otherwise drive the lateral correction past the relocation cap and refuse an honest mate. Centring is never a restriction: when the wall centres fail to mate, the exact hit points are retried before anything is refused, and turning the preference off restores click-defined depth.
 
 The centering correction retains the existing local trust principle: it may balance designed clearance but may not relocate the key to a different feature.
 

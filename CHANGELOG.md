@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.7.1
+
+### Fixed
+- Chamfered and filleted connectors mate. The neighbourhood search around a click
+  was a fixed two patch hops, which reaches the far wall of a plain box peg but
+  not of one whose edges are rounded -- every fillet ring inserts another hop. The
+  opposite wall was never found, and a nicely modelled key reported "no opposed
+  wall pair at the key click" however obvious the fit was. The search now widens
+  to at most four hops, and only when it would otherwise find nothing, so plain
+  connectors keep the patch set and the cost they had. Measured on a rectangular
+  peg and socket: 3- and 5-segment fillets went from refused to mated, in both
+  rotation modes, in 8-15 ms. Standard precision fit is untouched.
+
+## 1.7.0
+
+### Added
+- `Centre picks on the wall` (on by default) moves each Lock and key pick to the
+  middle of the flat wall it landed on, so the same two walls always mate the same
+  way however carelessly they were clicked. Sliding the pick inside its own plane
+  cannot change a measured wall width, so this only settles the axes the solver
+  leaves free. Turn it off to set the insertion depth by clicking deeper or
+  shallower.
+- Centring is never a restriction: if the wall centres do not mate, the exact
+  click points are retried before anything is refused.
+
+### Fixed
+- Two clicks placed far apart on a constrained axis could drive the lateral
+  correction past the relocation cap and refuse a mate that was perfectly
+  buildable. Centred picks remove that failure by construction.
+
+## 1.6.2
+
+### Fixed
+- Lock and key works whichever half you move. Which part is the socket is now
+  read from the wall normals instead of the click order, so moving a socket onto
+  a fixed peg mates exactly as moving the peg into the socket does -- the two
+  produce inverse deltas for the same seated assembly. Previously the second
+  click had to be the socket, and the reverse order was refused with "the key
+  does not fit inside the lock" no matter how well the parts fitted. A pairing of
+  two pegs or two sockets is still rejected, as is a peg genuinely wider than its
+  socket.
+- The insertion-axis guard follows the same rule and reads its half-space from
+  whichever click landed on the socket. Reading it from the peg's click rejected
+  every honest mate, because the socket wall on the far side of the peg
+  legitimately sits behind that plane.
+
+### Changed
+- "The key does not fit inside the lock" now reports both measurements, so a
+  scale mistake can be told apart from a taper mismatch or an overgrown patch.
+- Rotation search failures say what actually stopped them -- too many candidate
+  wall pairs, competing pairs on one axis, or too few pairs to pin a rotation --
+  instead of always blaming seating. Those causes previously went to the debug
+  log only, and the user saw "no rotation seats the key without penetrating the
+  lock" regardless.
+
 ## 1.6.1
 
 ### Fixed

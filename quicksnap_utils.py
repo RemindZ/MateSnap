@@ -363,7 +363,12 @@ def _patch_sort_key(patch):
     )
 
 
-def _candidate_patches(mesh_data, seed_polygons):
+def _candidate_patches(mesh_data, seed_polygons, hops=2):
+    """Patches within `hops` patch-boundary crossings of the clicked one.
+
+    Two hops is the historic radius and the default every caller but Lock and key
+    still uses; changing it here would move standard precision fit too.
+    """
     patches = {}
     frontier = []
     for polygon_index in seed_polygons:
@@ -372,7 +377,7 @@ def _candidate_patches(mesh_data, seed_polygons):
             patches[patch['id']] = patch
             frontier.append(patch)
 
-    for _ in range(2):
+    for _ in range(hops):
         next_frontier = []
         for patch in frontier:
             for edge_index in patch['boundary_edges']:
@@ -634,6 +639,80 @@ def _connector_side_pairs(patches, anchor):
     )
 
 
+def clicked_patch_centre(mesh_data, face_index):
+    """World-space centre of the flat wall a click landed on.
+
+    This is the patch's own area-weighted centroid, so it is the same point the
+    solver already uses as that plane's reference -- centring on it moves the anchor
+    within the plane, which leaves every measured wall width untouched and only
+    settles where along the free axes the parts come to rest.
+
+    Returns None when the click is not on a clean flat patch, which is exactly when
+    centring would be a guess; the caller keeps the exact hit in that case.
+    """
+    if mesh_data is None:
+        return None
+    index = int(face_index)
+    if index < 0 or index >= len(mesh_data['polygon_normals']):
+        return None
+    try:
+        patch = _grow_planar_patch(mesh_data, index)
+    except Exception:
+        return None
+    if patch is None:
+        return None
+    return Vector(tuple(float(value) for value in patch['point']))
+
+
+# A plain box peg reaches its far wall in two patch hops. Every chamfer or fillet
+# ring around an edge inserts another one, so a well-modelled connector puts its
+# opposite wall out of reach and the click looks like it landed on nothing at all.
+_CONNECTOR_MAX_HOPS = 4
+
+
+def _connector_pairs(mesh_data, seeds, anchor):
+    """Opposed wall pairs at a click, widening the search only when it finds none.
+
+    Widening costs patches quadratically, so stop at the first radius that sees any
+    opposed pair: that is the tightest neighbourhood which still describes the
+    connector, and it leaves plain connectors on exactly the patch set they had.
+    """
+    for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
+        pairs = _connector_side_pairs(
+            _candidate_patches(mesh_data, seeds, hops), anchor
+        )
+        if pairs:
+            return pairs
+    return []
+
+
+def _pair_is_female(pair):
+    """True when the walls face each other (a socket), false when they face out (a peg).
+
+    _connector_side_pairs only forms a pair when each wall's normal has at least a 0.5
+    component along the lateral axis, so this sign is never marginal. It also survives
+    _rotate_connector_pairs, which negates the axis and swaps the two walls together.
+    """
+    return float(pair['low_patch']['normal'] @ pair['axis']) > 0.0
+
+
+def _pair_clearance(source, target):
+    """Room the socket leaves around the peg, whichever half the user clicked first.
+
+    Which part is the socket is a fact about the wall normals, not about click order.
+    Some assemblies can only be built by moving the socket onto a fixed peg, and that
+    describes the same seated result, so the mate must not depend on which half was
+    picked as the mover. Returns None for two pegs or two sockets, which no rotation
+    can ever seat.
+    """
+    source_female = _pair_is_female(source)
+    if source_female == _pair_is_female(target):
+        return None
+    if source_female:
+        return source['width'] - target['width']
+    return target['width'] - source['width']
+
+
 def _match_connector_pairs(source_pairs, target_pairs):
     """Match compatible male/female wall pairs without guessing through ambiguity."""
     angle_tolerance = math.radians(5.0)
@@ -654,8 +733,11 @@ def _match_connector_pairs(source_pairs, target_pairs):
             # Judge clearance against how precisely the planes are defined. The
             # flatness tolerance scales with patch size and would demand roughly 2%
             # clearance on a 10-unit peg, rejecting realistic printed fits.
-            clearance = target['width'] - source['width']
-            if clearance < -(source['fit_tolerance'] + target['fit_tolerance']):
+            clearance = _pair_clearance(source, target)
+            if (
+                clearance is None
+                or clearance < -(source['fit_tolerance'] + target['fit_tolerance'])
+            ):
                 continue
             distance = float(np.linalg.norm(target['center'] - target['anchor']))
             candidates.append((distance, tolerance, target, clearance))
@@ -730,10 +812,11 @@ _ROTATION_MAX_PAIRS = 8
 
 def _rotation_compatible(source, target):
     """Could this source/target mapping ever fit? Rotation-invariant tests only."""
+    clearance = _pair_clearance(source, target)
     return (
-        abs(source['opening_angle'] - target['opening_angle']) <= math.radians(5.0)
-        and target['width'] - source['width']
-        >= -(source['fit_tolerance'] + target['fit_tolerance'])
+        clearance is not None
+        and abs(source['opening_angle'] - target['opening_angle']) <= math.radians(5.0)
+        and clearance >= -(source['fit_tolerance'] + target['fit_tolerance'])
     )
 
 
@@ -757,7 +840,7 @@ def _rotation_axis_ambiguous(pairs):
     return False
 
 
-def _prune_rotation_pairs(source_pairs, target_pairs):
+def _prune_rotation_pairs(source_pairs, target_pairs, diagnostics=None):
     """Reduce both lists to pairs that could plausibly drive a rotation.
 
     Every test here is rotation-invariant, so pruning can never prefer one
@@ -781,23 +864,25 @@ def _prune_rotation_pairs(source_pairs, target_pairs):
         target for target in targets
         if any(_rotation_compatible(source, target) for source in sources)
     ]
-    for label, pairs in (('source', sources), ('target', targets)):
+    for label, pairs in (('key', sources), ('lock', targets)):
         if len(pairs) > _ROTATION_MAX_PAIRS:
-            logger.debug(
-                f"Lock and key rotation skipped: {len(pairs)} plausible {label}"
-                f" pairs exceeds the {_ROTATION_MAX_PAIRS} supported by flat-sided"
-                f" connectors"
-            )
+            _note_lock_key_skip(
+                diagnostics,
+                f"the {label} offers {len(pairs)} candidate wall pairs and rotation"
+                f" searches at most {_ROTATION_MAX_PAIRS} -- this is built for"
+                " flat-sided connectors, and rounded ones reach dozens")
             return None
         if _rotation_axis_ambiguous(pairs):
-            logger.debug(
-                f"Lock and key rotation skipped: competing {label} pairs on one axis"
-            )
+            _note_lock_key_skip(
+                diagnostics,
+                f"two {label} wall pairs share an axis but would seat the mate"
+                " differently -- click on one clean connector wall")
             return None
     return sources, targets
 
 
-def _rotation_candidates(source_pairs, target_pairs, allow_mixed_anchor=False):
+def _rotation_candidates(
+        source_pairs, target_pairs, allow_mixed_anchor=False, diagnostics=None):
     """Enumerate compatible source/target wall mappings.
 
     `allow_mixed_anchor` pairs a wall click against a floor click. That mapping is
@@ -806,12 +891,22 @@ def _rotation_candidates(source_pairs, target_pairs, allow_mixed_anchor=False):
     every lateral test. The two travel together deliberately.
     """
     if len(source_pairs) < 2 or len(target_pairs) < 2:
+        _note_lock_key_skip(
+            diagnostics,
+            "rotation needs two independent wall pairs on each part and found"
+            f" {len(source_pairs)} on the key / {len(target_pairs)} on the lock --"
+            " click flat on a connector wall rather than a rim or a rounded face")
         return []
-    pruned = _prune_rotation_pairs(source_pairs, target_pairs)
+    pruned = _prune_rotation_pairs(source_pairs, target_pairs, diagnostics)
     if pruned is None:
         return []
     source_pairs, target_pairs = pruned
     if len(source_pairs) < 2 or len(target_pairs) < 2:
+        _note_lock_key_skip(
+            diagnostics,
+            "after discarding the wall pairs that can never fit, too few remain to"
+            f" pin a rotation ({len(source_pairs)} key / {len(target_pairs)} lock)"
+            " -- check that the two parts are the same scale")
         return []
     candidates = []
     # Combinations, not permutations: the target side already enumerates both
@@ -826,10 +921,12 @@ def _rotation_candidates(source_pairs, target_pairs, allow_mixed_anchor=False):
             swap_options = []
             for source, target in zip(sources, targets):
                 tolerance = source['fit_tolerance'] + target['fit_tolerance']
+                clearance = _pair_clearance(source, target)
                 if (
                     abs(source['opening_angle'] - target['opening_angle'])
                     > math.radians(5.0)
-                    or target['width'] - source['width'] < -tolerance
+                    or clearance is None
+                    or clearance < -tolerance
                     or (
                         not allow_mixed_anchor
                         and bool(source['anchor_side'])
@@ -977,27 +1074,34 @@ def _validate_lock_key_transform(matches, translation):
     return True
 
 
-def _buries_key_behind_target(pairs, translation, target_hit, target_normal):
-    """True when a candidate seats the connector behind the surface that was clicked.
+def _buries_key_behind_target(peg_pairs, peg_offset, face_point, face_normal):
+    """True when a candidate seats the peg behind the socket face that was clicked.
 
     Clearance validation only constrains the matched lateral axes; the insertion
     axis is left free. Without this, a rigid candidate can rotate the key end for
     end and sink it through the floor of the socket while every lateral test still
-    passes. The clicked target face normal points out of its material, so every
-    part of the mated connector has to stay on that side of it.
+    passes. The clicked socket face normal points out of its material, so every
+    part of the mated peg has to stay on that side of it.
+
+    Either half may be the one that moves, so the caller passes whichever pairs
+    belong to the peg plus the offset that lands them in their final place, and the
+    socket's clicked face expressed in that same final frame. Reading the half-space
+    off the peg's own click instead would reject every honest mate: the socket wall
+    on the far side of the peg legitimately sits behind that plane.
     """
-    if target_normal is None:
+    if face_normal is None:
         return False
-    normal = np.array(target_normal, dtype=np.float64)
+    normal = np.array(face_normal, dtype=np.float64)
     length = float(np.linalg.norm(normal))
     if length <= 1e-12:
         return False
     normal /= length
-    anchor = np.array(target_hit, dtype=np.float64)
-    for pair in pairs:
+    anchor = np.array(face_point, dtype=np.float64)
+    offset = np.array(peg_offset, dtype=np.float64)
+    for pair in peg_pairs:
         tolerance = pair['tolerance']
         for name in ('low_patch', 'high_patch'):
-            point = pair[name]['point'] + translation
+            point = pair[name]['point'] + offset
             if float(normal @ (point - anchor)) < -tolerance:
                 return True
     return False
@@ -1025,15 +1129,15 @@ def _connector_placement_signature(matches, translation):
     return tuple(sorted(planes))
 
 
-def _orientation_compatible_count(source_pairs, target_pairs):
-    """How many wall pairs are already facing each other, ignoring size.
+def _orientation_compatible_pairs(source_pairs, target_pairs):
+    """Every wall pairing already facing the right way, ignoring size.
 
     Separates "the key is not rotated into place" from "the parts do not fit":
     rotation can fix orientation, and can never fix missing clearance. Only the
     orientation filters from _match_connector_pairs are applied here.
     """
     opposed_limit = math.cos(math.radians(170.0))
-    count = 0
+    facing = []
     for source in source_pairs:
         for target in target_pairs:
             if float(source['axis'] @ target['axis']) < _FIT_COS_5:
@@ -1046,8 +1150,8 @@ def _orientation_compatible_count(source_pairs, target_pairs):
                 source['high_patch']['normal'] @ target['high_patch']['normal']
             ) > opposed_limit:
                 continue
-            count += 1
-    return count
+            facing.append((source, target))
+    return facing
 
 
 def _note_lock_key_skip(diagnostics, message):
@@ -1105,12 +1209,8 @@ def compute_lock_key_transform(
         return None
     source_anchor = np.array(source_hit, dtype=np.float64)
     target_anchor = np.array(target_hit, dtype=np.float64)
-    source_pairs = _connector_side_pairs(
-        _candidate_patches(source_data, source_seeds), source_anchor
-    )
-    target_pairs = _connector_side_pairs(
-        _candidate_patches(target_data, target_seeds), target_anchor
-    )
+    source_pairs = _connector_pairs(source_data, source_seeds, source_anchor)
+    target_pairs = _connector_pairs(target_data, target_seeds, target_anchor)
     matches = _match_connector_pairs(source_pairs, target_pairs)
     translation = _solve_lock_key_translation(matches, source_anchor, target_anchor)
     if translation is not None and _validate_lock_key_transform(matches, translation):
@@ -1133,7 +1233,8 @@ def compute_lock_key_transform(
             # lateral axes aligned within 5, so a key that is not already rotated
             # into place can never match however well the parts actually fit.
             # Distinguish that from parts that face each other but do not fit.
-            if _orientation_compatible_count(source_pairs, target_pairs) == 0:
+            facing = _orientation_compatible_pairs(source_pairs, target_pairs)
+            if not facing:
                 _note_lock_key_skip(
                     diagnostics,
                     "the key is not aligned with the lock -- turn on 'Rotate key to"
@@ -1141,10 +1242,23 @@ def compute_lock_key_transform(
                     f" ({len(source_pairs)} key / {len(target_pairs)} lock wall"
                     " pairs, none facing each other)")
             else:
+                # Report the near-miss that came closest to fitting, with both
+                # measurements: "wider than" alone leaves the user unable to tell a
+                # scale mistake from a taper mismatch or a wrongly-grown patch.
+                _, peg, socket = max(
+                    (
+                        (_pair_clearance(source, target) or 0.0,)
+                        + ((target, source) if _pair_is_female(source)
+                           else (source, target))
+                        for source, target in facing
+                    ),
+                    key=lambda item: item[0],
+                )
                 _note_lock_key_skip(
                     diagnostics,
-                    "the key does not fit inside the lock -- the key is wider than"
-                    " the lock, or their tapers differ"
+                    "the key does not fit inside the lock -- the peg measures"
+                    f" {peg['width']:.4g} across where the socket measures"
+                    f" {socket['width']:.4g}, or their tapers differ"
                     f" ({len(source_pairs)} key / {len(target_pairs)} lock"
                     " wall pairs)")
         else:
@@ -1156,10 +1270,13 @@ def compute_lock_key_transform(
         return None
 
     valid = []
-    for candidate in _rotation_candidates(
-        source_pairs, target_pairs,
-        allow_mixed_anchor=target_normal is not None,
-    ):
+    allow_mixed_anchor = target_normal is not None
+    explained = 0 if diagnostics is None else len(diagnostics)
+    candidates = _rotation_candidates(
+        source_pairs, target_pairs, allow_mixed_anchor=allow_mixed_anchor,
+        diagnostics=diagnostics,
+    )
+    for candidate in candidates:
         rotation = candidate['rotation']
         rotated_pairs = _rotate_connector_pairs(source_pairs, rotation)
         rotated_anchor = rotation @ source_anchor
@@ -1172,16 +1289,33 @@ def compute_lock_key_transform(
         rotated_translation = _solve_lock_key_translation(
             rotated_matches, rotated_anchor, target_anchor
         )
-        if (
-            rotated_translation is None
-            or not _validate_lock_key_transform(
-                rotated_matches, rotated_translation
+        if rotated_translation is None or not _validate_lock_key_transform(
+            rotated_matches, rotated_translation
+        ):
+            continue
+        # The insertion-axis guard reads the half-space off the socket's clicked
+        # face, so which half is the socket decides which click it reads and which
+        # pairs it tests. The matcher has already agreed on the roles by this point.
+        if _pair_is_female(rotated_matches[0]['source']):
+            socket_normal = (
+                None if source_normal is None
+                else rotation @ np.array(source_normal, dtype=np.float64)
             )
-            or _buries_key_behind_target(
+            if socket_normal is None and allow_mixed_anchor:
+                # Mixed anchors put the end-for-end flip back on the table, and only
+                # the socket's own click can discard it. Fail closed rather than seat
+                # a candidate that nothing constrained.
+                continue
+            buried = _buries_key_behind_target(
+                target_pairs, np.zeros(3),
+                rotated_anchor + rotated_translation, socket_normal,
+            )
+        else:
+            buried = _buries_key_behind_target(
                 rotated_pairs, rotated_translation,
                 target_anchor, target_normal,
             )
-        ):
+        if buried:
             continue
         rotation_matrix = mathutils.Matrix.Identity(4)
         for row in range(3):
@@ -1204,7 +1338,13 @@ def compute_lock_key_transform(
                 ),
             ))
     if not valid:
-        _note_lock_key_skip(diagnostics, "no rotation seats the key without penetrating the lock")
+        # Only fall back to the generic seating message when the enumeration has not
+        # already said something more useful -- the caller surfaces the last note, so
+        # appending here would bury "this connector has too many walls to search".
+        if diagnostics is None or len(diagnostics) == explained:
+            _note_lock_key_skip(
+                diagnostics,
+                "no rotation seats the key without penetrating the lock")
         return None
     # Smallest-angle ranking is only legitimate between candidates that seat the
     # mated walls identically. Candidates that seat them differently are a genuine

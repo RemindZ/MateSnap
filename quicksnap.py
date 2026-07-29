@@ -863,7 +863,36 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             self.lock_key_target_preview = hit
         context.window.cursor_set("CROSSHAIR")
 
+    def lock_key_centre_hit(self, context, hit):
+        """Move a pick to the middle of the flat wall it landed on.
+
+        The wall's centre is a property of the geometry, so the same two walls mate
+        the same way however carelessly they were clicked. Sliding the anchor inside
+        its own plane cannot change a measured wall width -- those are read plane to
+        plane -- so this only settles the axes the solver leaves free.
+
+        Deliberately done on click rather than on hover: growing a patch across a
+        dense flat wall costs hundreds of milliseconds the first time, which is a
+        fine one-off on a click and a stall on every mouse move. The result is cached
+        per wall, and the click path pays for the extraction regardless.
+        """
+        if (
+            hit is None or context is None
+            or not getattr(self.settings, 'lock_and_key_centre_picks', True)
+        ):
+            return hit
+        centre = quicksnap_utils.clicked_patch_centre(
+            self.lock_key_mesh_data(context, hit['object_name']),
+            hit['face_index'],
+        )
+        if centre is None:
+            return hit
+        centred = dict(hit)
+        centred['location'] = centre
+        return centred
+
     def record_lock_key_source(self, hit, context=None):
+        centred = self.lock_key_centre_hit(context, hit)
         signature = hit.get('geometry_signature')
         if signature is None and context is not None:
             signature = self.lock_key_geometry_signature(
@@ -873,7 +902,10 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = {
             'object_name': hit['object_name'],
             'face_index': int(hit['face_index']),
-            'location': Vector(hit['location']).copy(),
+            'location': Vector(centred['location']).copy(),
+            # Kept so a centred pick can never be a restriction: if the wall centres
+            # do not mate, the exact click is tried before anything is refused.
+            'raw_location': Vector(hit['location']).copy(),
             'normal': None if normal is None else Vector(normal).copy(),
             'geometry_signature': signature,
         }
@@ -905,34 +937,50 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 )
                 self.reset_lock_key_source()
                 return False
+        centred = self.lock_key_centre_hit(context, hit)
+        raw_source = source.get('raw_location', source['location'])
+        attempts = [(source['location'], centred['location'])]
+        if (
+            raw_source != source['location']
+            or centred['location'] != hit['location']
+        ):
+            # Centring is a convenience, never a restriction. A wall that is coplanar
+            # with a large body plate centres far from its connector, so fall back to
+            # exactly where the user clicked before refusing the mate.
+            attempts.append((raw_source, hit['location']))
         diagnostics = []
-        try:
-            delta = quicksnap_utils.compute_lock_key_transform(
-                context,
-                self.settings,
-                source['object_name'],
-                source['face_index'],
-                source['location'],
-                hit['object_name'],
-                hit['face_index'],
-                hit['location'],
-                allow_rotation=getattr(
-                    self.settings, "lock_and_key_rotate", False
-                ),
-                source_mesh_data=self.lock_key_mesh_data(
-                    context, source['object_name']
-                ),
-                target_mesh_data=self.lock_key_mesh_data(
-                    context, hit['object_name']
-                ),
-                source_normal=source.get('normal'),
-                target_normal=hit.get('normal'),
-                diagnostics=diagnostics,
-            )
-        except Exception as error:
-            logger.warning(f"Lock and key skipped: {error}")
-            diagnostics.append(str(error))
-            delta = None
+        delta = None
+        for source_location, target_location in attempts:
+            diagnostics = []
+            try:
+                delta = quicksnap_utils.compute_lock_key_transform(
+                    context,
+                    self.settings,
+                    source['object_name'],
+                    source['face_index'],
+                    source_location,
+                    hit['object_name'],
+                    hit['face_index'],
+                    target_location,
+                    allow_rotation=getattr(
+                        self.settings, "lock_and_key_rotate", False
+                    ),
+                    source_mesh_data=self.lock_key_mesh_data(
+                        context, source['object_name']
+                    ),
+                    target_mesh_data=self.lock_key_mesh_data(
+                        context, hit['object_name']
+                    ),
+                    source_normal=source.get('normal'),
+                    target_normal=hit.get('normal'),
+                    diagnostics=diagnostics,
+                )
+            except Exception as error:
+                logger.warning(f"Lock and key skipped: {error}")
+                diagnostics.append(str(error))
+                delta = None
+            if delta is not None:
+                break
         if delta is None:
             # Name the actual cause: one generic message for eight different
             # failures leaves the user with nothing to try differently.
@@ -1790,6 +1838,12 @@ class QuickVertexSnapPreference(bpy.types.AddonPreferences):
         description="Also align compatible connector wall directions."
                     " Ambiguous or underconstrained rotation is rejected",
         default=False)
+    lock_and_key_centre_picks: bpy.props.BoolProperty(
+        name="Centre picks on the wall",
+        description="Move each pick to the middle of the flat wall it landed on,"
+                    " so the same two walls always mate the same way. Turn off to"
+                    " set the insertion depth by clicking deeper or shallower",
+        default=True)
 
     snap_source_type: bpy.props.EnumProperty(
         name="Snap From",
@@ -1882,6 +1936,7 @@ class QuickVertexSnapPreference(bpy.types.AddonPreferences):
         lock_box.prop(self, "lock_and_key_mode")
         if self.lock_and_key_mode:
             lock_box.prop(self, "lock_and_key_rotate")
+            lock_box.prop(self, "lock_and_key_centre_picks")
         col.prop(self, "snap_objects_origin")
         col.prop(self, "draw_rubberband")
         col.prop(self, "hide_selection_over_target")
@@ -2026,6 +2081,11 @@ class QUICKSNAP_PT_toolbar(bpy.types.Panel):
                 settings,
                 "lock_and_key_rotate",
                 text="Rotate key to match lock",
+            )
+            col.prop(
+                settings,
+                "lock_and_key_centre_picks",
+                text="Centre picks on the wall",
             )
         col.prop(settings, "precision_fit", text="Post-snap precision fit")
         col.prop(settings, "corner_snapping", text="Prefer corners")

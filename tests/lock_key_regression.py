@@ -196,6 +196,7 @@ LOCK_KEY_OPERATOR_METHODS = (
     "lock_key_raycast_scene",
     "lock_key_raycast_visible",
     "raycast_lock_key_surface",
+    "lock_key_centre_hit",
     "record_lock_key_source",
     "apply_world_delta_to_selection",
     "finish_lock_key",
@@ -214,7 +215,8 @@ def make_lock_key_operator(selection_names, ignore_modifiers=False):
     operator = LockKeyStub()
     operator.report = lambda *args, **kwargs: None
     operator.settings = SimpleNamespace(
-        ignore_modifiers=ignore_modifiers, lock_and_key_rotate=False
+        ignore_modifiers=ignore_modifiers, lock_and_key_rotate=False,
+        lock_and_key_centre_picks=True,
     )
     operator.selection_objects = list(selection_names)
     operator.lock_key_source_hit = None
@@ -1168,6 +1170,276 @@ def assert_lock_key_settings_persist():
         raise AssertionError("Lock and key preferences did not round-trip")
 
 
+def assert_either_half_may_move():
+    """Click order must not decide which half is allowed to be the socket.
+
+    Plenty of kits can only be assembled by moving the socket onto a fixed peg. That
+    is the same seated result as moving the peg, so both orders must mate and the two
+    deltas must be inverses of each other. Deciding the roles from the wall normals
+    instead of the click order is what makes that true.
+    """
+    settings = SimpleNamespace(ignore_modifiers=True)
+
+    def both_orders(builder, allow_rotation):
+        clear_scene()
+        key, key_face, key_hit, lock, lock_face, lock_hit = builder()
+        results = {}
+        for label, args in (
+            ('peg first', (key.name, key_face, key_hit,
+                           lock.name, lock_face, lock_hit)),
+            ('socket first', (lock.name, lock_face, lock_hit,
+                              key.name, key_face, key_hit)),
+        ):
+            diagnostics = []
+            results[label] = quicksnap_utils.compute_lock_key_transform(
+                bpy.context, settings, *args,
+                allow_rotation=allow_rotation, diagnostics=diagnostics,
+            )
+            results[label + ' reason'] = (
+                diagnostics[-1] if diagnostics else 'no reason given'
+            )
+        return results
+
+    for allow_rotation in (False, True):
+        mode = 'rotation on' if allow_rotation else 'rotation off'
+        results = both_orders(
+            lambda: make_key_lock(target_half_height=0.45), allow_rotation
+        )
+        forward = results['peg first']
+        reverse = results['socket first']
+        if forward is None:
+            raise AssertionError(
+                f"the peg-first order stopped mating ({mode}): "
+                f"{results['peg first reason']}"
+            )
+        if reverse is None:
+            raise AssertionError(
+                f"moving the socket onto the peg was refused ({mode}): "
+                f"{results['socket first reason']}"
+            )
+        assert_matrix_finite(reverse)
+        # Same seated assembly from either end: one delta moves the peg, the other
+        # moves the socket, so composing them has to land back on identity.
+        residual = reverse @ forward
+        for row in range(4):
+            for column in range(4):
+                expected = 1.0 if row == column else 0.0
+                if abs(residual[row][column] - expected) > 1e-6:
+                    raise AssertionError(
+                        f"the two click orders seat the parts differently ({mode}): "
+                        f"{[list(line) for line in residual]}"
+                    )
+
+    # The safety half has to survive: a peg genuinely wider than its socket is still
+    # refused whichever end the user picks first.
+    results = both_orders(
+        lambda: make_key_lock(target_half_width=0.4, target_half_height=0.3),
+        False,
+    )
+    for label in ('peg first', 'socket first'):
+        if results[label] is not None:
+            raise AssertionError(f"an oversized peg mated anyway ({label})")
+
+
+def assert_picks_centre_on_their_wall():
+    """A pick lands on the middle of the wall, so sloppy clicks still agree.
+
+    That repeatability is the whole point of centring. It must also never become a
+    restriction: with the preference off the exact click still decides, and the exact
+    click is retried whenever the wall centres fail to mate.
+    """
+    key_normal = Vector((-1.0, 0.0, 0.0))
+    lock_normal = Vector((1.0, 0.0, 0.0))
+
+    def mate(source_offset, target_offset, centre_picks=True):
+        clear_scene()
+        key, key_face, key_hit, lock, lock_face, lock_hit = make_straight_key_lock()
+        operator = make_lock_key_operator([key.name])
+        operator.settings.lock_and_key_centre_picks = centre_picks
+        operator.record_lock_key_source(
+            LockKeyStub.lock_key_hit(
+                key.name, key_face, key_hit + source_offset, key_normal
+            ),
+            bpy.context,
+        )
+        mated = operator.finish_lock_key(
+            bpy.context,
+            LockKeyStub.lock_key_hit(
+                lock.name, lock_face, lock_hit + target_offset, lock_normal
+            ),
+        )
+        return mated, key.matrix_world.copy(), operator.lock_key_source_hit
+
+    # The key's clicked wall is one quad spanning z -1..0 and y -0.4..0.4 at x=-0.5,
+    # and the key sits at (2, -1, 0), so its centre is world (1.5, -1, -0.5).
+    mated, _, source = mate(Vector((0.0, 0.2, -0.4)), Vector((0.0, -0.3, 0.3)))
+    if not mated:
+        raise AssertionError("an off-centre click stopped mating")
+    # Blender stores mesh coordinates as float32, so compare at that precision.
+    for axis, expected in enumerate((1.5, -1.0, -0.5)):
+        if abs(source['location'][axis] - expected) > 1e-6:
+            raise AssertionError(
+                f"the pick did not centre on its wall: {source['location'][:]}"
+            )
+    if abs(source['raw_location'][1] - -0.8) > 1e-6:
+        raise AssertionError(
+            f"the exact click was not kept: {source['raw_location'][:]}"
+        )
+
+    # Two clicks on the same two walls, far apart, must seat the parts identically.
+    _, sloppy, _ = mate(Vector((0.0, 0.3, -0.5)), Vector((0.0, -0.4, 0.4)))
+    _, tidy, _ = mate(Vector((0.0, -0.3, 0.2)), Vector((0.0, 0.4, -0.6)))
+    for row in range(4):
+        for column in range(4):
+            if abs(sloppy[row][column] - tidy[row][column]) > 1e-9:
+                raise AssertionError(
+                    "centred picks still depend on where the user clicked"
+                )
+
+    # With the preference off, click-controlled insertion depth must come back --
+    # otherwise the toggle is a lie. Vary only depth here: clicking far apart across
+    # a *constrained* axis pushes the lateral correction past the relocation cap and
+    # refuses the mate outright, which is the fiddliness centring exists to remove.
+    mated_a, loose_a, source_a = mate(
+        Vector((0.0, 0.0, -0.5)), Vector((0.0, 0.0, 0.4)), centre_picks=False
+    )
+    mated_b, loose_b, _ = mate(
+        Vector((0.0, 0.0, 0.2)), Vector((0.0, 0.0, -0.6)), centre_picks=False
+    )
+    if not (mated_a and mated_b):
+        raise AssertionError("an exact-click mate stopped working with centring off")
+    if abs(source_a['location'][2] - source_a['raw_location'][2]) > 1e-12:
+        raise AssertionError("the pick was centred while the preference was off")
+    if all(
+        abs(loose_a[row][column] - loose_b[row][column]) <= 1e-9
+        for row in range(4) for column in range(4)
+    ):
+        raise AssertionError(
+            "turning centring off changed nothing about where the parts land"
+        )
+
+
+def make_filleted_pair(segments, bevel=0.06, half=0.5, depth=2.0, clearance=0.06):
+    """A rectangular peg and socket with filleted edges, the way a kit is modelled.
+
+    Each fillet ring inserts another patch hop between a wall and its opposite, which
+    is exactly what puts the far wall out of reach of a fixed-radius search.
+    """
+    def block(name, x_half, y_half, z_half, location):
+        bpy.ops.mesh.primitive_cube_add(size=2.0, location=location)
+        obj = bpy.context.active_object
+        obj.name = name
+        obj.scale = (x_half, y_half, z_half)
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        if bevel > 0.0:
+            modifier = obj.modifiers.new("bevel", 'BEVEL')
+            modifier.width = bevel
+            modifier.segments = segments
+            bpy.ops.object.modifier_apply(modifier="bevel")
+        return obj
+
+    key = block("Key", half, half, depth * 0.5, (6.0, 0.0, 0.0))
+    lock = block(
+        "Lock", (half + clearance) * 2.2, (half + clearance) * 2.2, depth * 0.6,
+        (0.0, 0.0, 0.0),
+    )
+    cutter = block(
+        "Cutter", half + clearance, half + clearance, depth * 0.7,
+        (0.0, 0.0, depth * 0.3),
+    )
+    modifier = lock.modifiers.new("cut", 'BOOLEAN')
+    modifier.operation = 'DIFFERENCE'
+    modifier.object = cutter
+    bpy.context.view_layer.objects.active = lock
+    bpy.ops.object.modifier_apply(modifier="cut")
+    bpy.data.objects.remove(cutter, do_unlink=True)
+    bpy.context.view_layer.update()
+
+    def wall(obj, axis, inward):
+        axis = np.array(axis, dtype=np.float64)
+        matrix = np.array(obj.matrix_world, dtype=np.float64)
+        best, best_area = None, -1.0
+        for polygon in obj.data.polygons:
+            normal = matrix[:3, :3] @ np.array(polygon.normal)
+            normal /= max(float(np.linalg.norm(normal)), 1e-12)
+            if float(normal @ axis) < 0.99:
+                continue
+            centre = matrix[:3, :3] @ np.array(polygon.center) + matrix[:3, 3]
+            # A socket's inner wall faces the cavity; its outer wall faces away.
+            offset = float((centre - matrix[:3, 3]) @ axis)
+            if (offset > 0.0) if inward else (offset < 0.0):
+                continue
+            if polygon.area > best_area:
+                best, best_area = polygon.index, polygon.area
+        return best
+
+    key_face = wall(key, (-1.0, 0.0, 0.0), inward=False)
+    lock_face = wall(lock, (1.0, 0.0, 0.0), inward=True)
+    if key_face is None or lock_face is None:
+        raise AssertionError("the filleted fixture has no clickable connector wall")
+    return (
+        key, key_face, key.matrix_world @ key.data.polygons[key_face].center,
+        lock, lock_face, lock.matrix_world @ lock.data.polygons[lock_face].center,
+    )
+
+
+def assert_filleted_connectors_mate():
+    """A well-modelled peg must not be harder to mate than a crude one.
+
+    A plain box peg reaches its far wall in two patch hops. Every chamfer or fillet
+    ring inserts another, so a fixed two-hop neighbourhood never sees the opposite
+    wall of a nicely modelled connector and the click looks like it landed on
+    nothing. The search now widens when it finds no opposed pair at all.
+    """
+    settings = SimpleNamespace(ignore_modifiers=True)
+    for segments in (1, 3, 5):
+        clear_scene()
+        key, key_face, key_hit, lock, lock_face, lock_hit = make_filleted_pair(
+            segments
+        )
+        for allow_rotation in (False, True):
+            diagnostics = []
+            delta = quicksnap_utils.compute_lock_key_transform(
+                bpy.context, settings,
+                key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+                allow_rotation=allow_rotation,
+                source_normal=Vector((-1.0, 0.0, 0.0)),
+                target_normal=Vector((1.0, 0.0, 0.0)),
+                diagnostics=diagnostics,
+            )
+            if delta is None:
+                raise AssertionError(
+                    f"a {segments}-segment filleted connector was refused"
+                    f" (rotation {'on' if allow_rotation else 'off'}): "
+                    f"{diagnostics[-1] if diagnostics else 'no reason given'}"
+                )
+            assert_matrix_finite(delta)
+
+    # Prove the widening is what carries it: pinned back to the historic two-hop
+    # radius, this same pair is refused for want of any opposed wall pair at all.
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_filleted_pair(3)
+    original = quicksnap_utils._CONNECTOR_MAX_HOPS
+    try:
+        quicksnap_utils._CONNECTOR_MAX_HOPS = 2
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, settings,
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+            allow_rotation=False, diagnostics=diagnostics,
+        )
+    finally:
+        quicksnap_utils._CONNECTOR_MAX_HOPS = original
+    if delta is not None:
+        raise AssertionError(
+            "the two-hop radius mates filleted connectors, so this guards nothing"
+        )
+    if "no opposed wall pair" not in diagnostics[-1]:
+        raise AssertionError(
+            f"the two-hop radius failed for a different reason: {diagnostics[-1]!r}"
+        )
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1203,6 +1475,12 @@ def main():
     print("non-uniform transform: PASS")
     assert_realistic_clearance_mates()
     print("realistic print clearances: PASS")
+    assert_either_half_may_move()
+    print("either half may move: PASS")
+    assert_picks_centre_on_their_wall()
+    print("picks centre on their wall: PASS")
+    assert_filleted_connectors_mate()
+    print("filleted connectors mate: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()
