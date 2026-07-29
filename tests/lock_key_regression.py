@@ -1568,6 +1568,57 @@ def assert_thin_tabs_keep_their_thin_axis():
             )
 
 
+def assert_patch_budget_does_not_cut_the_search_short():
+    """A dense neighbourhood must not stop the search reaching the far wall.
+
+    The patch budget guards the unfloored fallback, whose pairing is quadratic in
+    every sliver it re-admits. The floored pass only ever pairs substantial walls --
+    a handful even on a part with thousands of patches -- so budgeting it by total
+    patch count stopped the walk long before it could cross to the far wall, on
+    exactly the dense parts that need the reach most.
+
+    Driving the budget to 1 stands in for that part: the walk must still get there.
+    """
+    settings = SimpleNamespace(ignore_modifiers=True)
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_filleted_pair(3)
+    original = quicksnap_utils._CONNECTOR_MAX_PATCHES
+    try:
+        quicksnap_utils._CONNECTOR_MAX_PATCHES = 1
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, settings,
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+            allow_rotation=False, diagnostics=diagnostics,
+        )
+    finally:
+        quicksnap_utils._CONNECTOR_MAX_PATCHES = original
+    if delta is None:
+        raise AssertionError(
+            "the patch budget stopped the floored search reaching the far wall: "
+            f"{diagnostics[-1] if diagnostics else 'no reason given'}"
+        )
+
+    # And a refusal must describe the radius it actually searched, not the radius it
+    # was allowed -- reporting geometry that was never considered reads as evidence
+    # and is not.
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_straight_key_lock()
+    diagnostics = []
+    quicksnap_utils.compute_lock_key_transform(
+        bpy.context, settings,
+        key.name, key_face, key_hit, lock.name, lock_face,
+        # A click out in space belongs to no connector, so this refuses and reports.
+        Vector((500.0, 500.0, 500.0)),
+        allow_rotation=False, diagnostics=diagnostics,
+    )
+    if diagnostics and "searched" in diagnostics[-1]:
+        if "patch hops" not in diagnostics[-1]:
+            raise AssertionError(
+                f"the refusal does not name its search radius: {diagnostics[-1]!r}"
+            )
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1611,6 +1662,8 @@ def main():
     print("filleted connectors mate: PASS")
     assert_thin_tabs_keep_their_thin_axis()
     print("thin tabs keep their thin axis: PASS")
+    assert_patch_budget_does_not_cut_the_search_short()
+    print("patch budget does not cut the search short: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

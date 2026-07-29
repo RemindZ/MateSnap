@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.7.6
+
+### Fixed
+- A dense neighbourhood no longer cuts the connector search short. The walk stopped
+  once it had reached a few hundred patches, which was meant to bound a quadratic
+  cost -- but that cost only exists in the unfloored fallback, which re-admits
+  every sliver. The floored pass pairs substantial walls only, a handful even on a
+  part with thousands of patches, so the budget was stopping it long before it
+  could cross to the far wall on exactly the dense parts that need the reach most.
+  It now applies to the fallback alone.
+
+### Changed
+- A refusal describes the radius the search actually reached, and says when the
+  budget stopped it. It previously reported the neighbourhood at the maximum
+  allowed radius, which the search often never reaches -- so it described geometry
+  that was never considered, which reads as evidence and is not.
+
 ## 1.7.5
 
 ### Fixed

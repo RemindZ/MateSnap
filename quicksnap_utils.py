@@ -710,14 +710,16 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
     # much smaller than the clicked one -- or whose clicked patch merged with a large
     # coplanar body face, inflating the floor -- would otherwise be refused outright
     # for the sake of a filter that exists only to keep bevel slivers out.
+    searched = (2, 0, False)
     for fraction in (_CONNECTOR_MIN_WALL_FRACTION, 0.0):
         floor = fraction * area
         for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
             reached = _candidate_patches(mesh_data, seeds, hops)
-            pairs = _connector_side_pairs(
-                [patch for patch in reached if float(patch['area']) >= floor],
-                anchor,
-            )
+            walls = [
+                patch for patch in reached if float(patch['area']) >= floor
+            ]
+            searched = (hops, len(reached), False)
+            pairs = _connector_side_pairs(walls, anchor)
             if len(pairs) > _CONNECTOR_MAX_WALL_PAIRS:
                 # Only the floored pass can call something a curve. The fallback
                 # below re-admits every sliver, so its pair count measures how
@@ -733,30 +735,45 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                 break
             if pairs:
                 return pairs, None
-            if len(reached) >= _CONNECTOR_MAX_PATCHES:
-                logger.debug(
-                    f"Lock and key stopped widening at {hops} hops:"
-                    f" {len(reached)} patches and still no opposed wall pair"
-                )
+            # The patch budget guards the unfloored fallback, whose pairing is
+            # quadratic in every sliver it re-admits. The floored pass only ever
+            # pairs substantial walls -- a handful even on a part with thousands of
+            # patches -- so budgeting it by total patch count stopped the walk long
+            # before it could cross to the far wall, on exactly the dense parts that
+            # need the reach most.
+            if floor <= 0.0 and len(reached) >= _CONNECTOR_MAX_PATCHES:
+                searched = (hops, len(reached), True)
                 break
         if floor <= 0.0:
             break
-    return [], None
+    advice = (
+        "click flat on a connector wall, not a rounded or angled face"
+        if label == 'key' else "click flat on an inner wall of the socket"
+    )
+    return [], (
+        f"no opposed wall pair at the {label} click -- {advice} ("
+        + _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label)
+        + ")"
+    )
 
 
-def _describe_missing_wall_pair(mesh_data, seeds, anchor):
+def _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label='key'):
     """Say what the click did find, so a refusal is diagnosable rather than flat.
 
     "No opposed wall pair" covers every way the search can come up empty, and the
     shapes that reach it are exactly the ones nobody can picture from a description.
     Counting where the candidates fell out turns the next report into evidence.
-    Only ever runs on the failure path.
+
+    `searched` is the radius the search actually reached, not the radius it is
+    allowed. Describing the wider one reports geometry that was never considered,
+    which reads as evidence and is not. Only ever runs on the failure path.
     """
+    hops, total, budget_stopped = searched
     clicked = _grow_planar_patch(mesh_data, int(seeds[0])) if seeds else None
     if clicked is None:
         return "the clicked face is not part of a flat patch"
     anchor = np.array(anchor, dtype=np.float64)
-    patches = _candidate_patches(mesh_data, seeds, _CONNECTOR_MAX_HOPS)
+    patches = _candidate_patches(mesh_data, seeds, hops)
     facing = skewed = behind = 0
     for patch in patches:
         if patch['id'] == clicked['id']:
@@ -791,8 +808,9 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor):
         * float(clicked['area'])
     )
     parts = [
-        f"{len(patches)} flat patches in reach, {substantial} of them a tenth the"
-        f" clicked wall or bigger"
+        f"searched {hops} patch hops from the {label} click and reached"
+        f" {len(patches)} flat patches, {substantial} of them a tenth the clicked"
+        f" wall or bigger"
     ]
     if not facing:
         parts.append("none facing the clicked wall")
@@ -802,6 +820,11 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor):
             parts.append(f"{skewed} at too shallow an angle")
         if behind:
             parts.append(f"{behind} not spanning the click")
+    if budget_stopped:
+        parts.append(
+            f"the walk stopped on its {total}-patch budget, so the far wall may"
+            " simply be further out than it looked"
+        )
     # A flat wall broken into dozens of slivers by triangulation or a boolean reads
     # exactly like a curve to the pairing rules, and the two need different fixes.
     if len(patches) >= 12 and substantial <= 2:
@@ -1349,23 +1372,9 @@ def compute_lock_key_transform(
         )
     if not allow_rotation:
         if not source_pairs:
-            _note_lock_key_skip(
-                diagnostics,
-                source_reason or (
-                    "no opposed wall pair at the key click -- click flat on a"
-                    " connector wall, not a rounded or angled face ("
-                    + _describe_missing_wall_pair(
-                        source_data, source_seeds, source_anchor)
-                    + ")"))
+            _note_lock_key_skip(diagnostics, source_reason)
         elif not target_pairs:
-            _note_lock_key_skip(
-                diagnostics,
-                target_reason or (
-                    "no opposed wall pair at the lock click -- click flat on an"
-                    " inner wall of the socket ("
-                    + _describe_missing_wall_pair(
-                        target_data, target_seeds, target_anchor)
-                    + ")"))
+            _note_lock_key_skip(diagnostics, target_reason)
         elif not matches:
             # Matching needs the walls anti-parallel within 10 degrees and the
             # lateral axes aligned within 5, so a key that is not already rotated
