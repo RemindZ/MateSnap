@@ -63,7 +63,11 @@ The suites are unusual because Blender's background mode is restricted:
 - The harness loads `quicksnap_utils` **twice** — once standalone as `quicksnap_utils_under_test`, once as `quicksnap.quicksnap_utils` via the package. `State.IDLE` from one is **not** the same object as from the other; compare against `quicksnap.State` when checking operator state. Monkeypatching must target the same instance the code under test imported.
 - `terminate()` touches `bpy.context.window`, which is `None` in background mode. Logic that needs testing gets extracted into a small static method (e.g. `ensure_active_object`) rather than tested through `terminate`.
 - Operator methods are exercised through a stub class built from `QuickVertexSnapOperator.__dict__` (`make_lock_key_operator`), pulled from `__dict__` so `staticmethod` descriptors survive. Add new operator methods to `LOCK_KEY_OPERATOR_METHODS` when tests need them.
-- `bpy.ops.ed.undo()` fails its context poll headless, so **undo behaviour cannot be regression-tested** — it needs a manual check in the GUI.
+- `bpy.ops.ed.undo()` fails its context poll headless, so **undo behaviour cannot be regression-tested** — it needs a manual check in the GUI. Manually verified working after a completed Lock and key mate (2026-07-30, 1.8.2); re-check by hand if the apply path changes.
+
+## Diagnosing user reports
+
+This addon ships publicly and users' models are often proprietary, so **a failure must be diagnosable from the addon's own log output** — never ask for a `.blend` or hand the user a script to run. `lock_key_diagnostic_report` in `quicksnap_utils.py` is the pattern: it runs only on the refusal path and dumps patches reached, walls recovered, facing counts, separations, and surviving pairs. Extend it rather than adding another one-line message. Needing the file means the logging is incomplete.
 
 ## Conventions
 
