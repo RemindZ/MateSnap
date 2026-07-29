@@ -78,10 +78,14 @@ Standard precision fit keeps its strict 170-degree opposed-wall rule. Lock and k
 Form a connector side pair when:
 
 - both patches are clean and planar;
-- their outward normals face generally away from one another (`dot < 0`), excluding adjacent faces;
+- their outward normals face away from one another by at least 95 degrees, excluding adjacent faces;
 - their normal difference defines a stable lateral direction;
 - the clicked point projects within the pair's lateral interval plus flatness tolerance;
 - neither patch has zero area or extent.
+
+Amended 2026-07-29: the opposition rule carries a 95-degree margin rather than asking only for a negative dot. A clean corner has a dot of exactly zero and was excluded by arithmetic alone; a corner with any modelling noise lands either side of zero, so half the corners in a neighbourhood became plausible pairs on 45-degree axes. They crowd out the real walls, and because the search stops at the first radius that yields any pair, they also stop it widening to reach the far wall.
+
+Amended 2026-07-29: patches are grouped by plane before pairing, so a wall that arrives cut into fragments is treated as the single wall the modeller drew. The growth step cannot do this on its own -- its offset allowance scales with edge length, and a finely cut wall has tiny edges, so sub-millimetre wobble stops it merging. Without grouping, a click on a fragmented wall lands on one sliver, every neighbour faces the same way, and the opposite wall is hundreds of fragments away: further than any affordable search, and indistinguishable from a curve. Merged walls recompute their own tolerances, whose residual is the real spread of the fragments about the plane.
 
 Amended 2026-07-29: whether the two walls are measurably apart is judged against the precision tolerance, not the flatness allowance. The allowance is 0.5% of a patch's extent, so on a broad thin tab it exceeds the tab's own thickness and discards the thin-axis pair -- the one axis such a connector needs centred. The mate then still succeeds on the remaining axes and silently leaves the part uncentred, which is worse than refusing. Flatness still governs the questions it belongs to: whether the click lies within the pair's lateral interval, and how far a wall may sit off its plane.
 

@@ -1619,6 +1619,113 @@ def assert_patch_budget_does_not_cut_the_search_short():
             )
 
 
+def make_fragmented_pair(cuts, wobble, half=0.5, depth=2.0, clearance=0.06):
+    """A peg whose flat walls arrive cut into fragments, as modelled parts do.
+
+    Subdivision plus sub-degree normal noise is what a sculpted, decimated or
+    scanned part looks like: geometrically flat walls that the patch growth step
+    refuses to merge, because its offset allowance scales with edge length and a
+    finely cut wall has tiny edges.
+    """
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(5.0, 0.0, 0.0))
+    key = bpy.context.active_object
+    key.name = "Key"
+    key.scale = (half, half, depth * 0.5)
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    modifier = key.modifiers.new("sub", 'SUBSURF')
+    modifier.subdivision_type = 'SIMPLE'
+    modifier.levels = cuts
+    bpy.ops.object.modifier_apply(modifier="sub")
+    if wobble:
+        rng = np.random.default_rng(11)
+        jitter = rng.normal(0.0, wobble, (len(key.data.vertices), 3))
+        for vertex, offset in zip(key.data.vertices, jitter):
+            vertex.co += Vector(offset.tolist())
+        key.data.update()
+
+    lock_half = half + clearance
+    lock = make_mesh(
+        "Lock",
+        [(-lock_half, -lock_half, 0.0), (lock_half, -lock_half, 0.0),
+         (lock_half, lock_half, 0.0), (-lock_half, lock_half, 0.0),
+         (-lock_half, -lock_half, -depth * 0.6),
+         (lock_half, -lock_half, -depth * 0.6),
+         (lock_half, lock_half, -depth * 0.6),
+         (-lock_half, lock_half, -depth * 0.6)],
+        [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3)],
+    )
+    bpy.context.view_layer.update()
+
+    # Both clicks at the same depth, so the coarse translation is purely lateral.
+    key_hit = key.matrix_world @ Vector((-half, 0.0, -depth * 0.25))
+    key_face = min(
+        (p.index for p in key.data.polygons if p.normal.x < -0.9),
+        key=lambda index: (
+            key.matrix_world @ key.data.polygons[index].center - key_hit
+        ).length,
+    )
+    lock_hit = lock.matrix_world @ Vector((-lock_half, 0.0, -depth * 0.25))
+    return key, key_face, key_hit, lock, 3, lock_hit
+
+
+def assert_fragmented_walls_are_rebuilt():
+    """A wall cut into fragments must still behave as one wall.
+
+    Without merging, the click lands on a fragment, every neighbour faces the same
+    way, and the opposite wall sits hundreds of fragments away -- further than any
+    affordable search. The reported signature was exactly that: a tiny clicked
+    patch, every neighbour a similar size, and nothing facing back after 8 hops.
+    """
+    settings = SimpleNamespace(ignore_modifiers=True)
+    clear_scene()
+    clean_key, clean_face, clean_hit, _, _, _ = make_fragmented_pair(3, 0.0)
+    clean_data = quicksnap_utils._mesh_fit_data(clean_key)
+    reach = quicksnap_utils._CONNECTOR_MAX_HOPS
+    _, clean_wall = quicksnap_utils._connector_walls(
+        clean_data, quicksnap_utils._seed_polygons(clean_data, 'FACES', clean_face),
+        reach,
+    )
+    whole_wall = float(clean_wall['area'])
+
+    for cuts, wobble in ((3, 0.0015), (3, 0.004), (4, 0.002)):
+        clear_scene()
+        key, key_face, key_hit, lock, lock_face, lock_hit = make_fragmented_pair(
+            cuts, wobble
+        )
+        data = quicksnap_utils._mesh_fit_data(key)
+        seeds = quicksnap_utils._seed_polygons(data, 'FACES', key_face)
+        # At the radius the search can actually reach; a fixed small radius has not
+        # yet crossed the wall, so the merged wall is legitimately partial there.
+        raw = quicksnap_utils._candidate_patches(data, seeds, reach)
+        merged, clicked = quicksnap_utils._connector_walls(data, seeds, reach)
+        if clicked is None:
+            raise AssertionError("the clicked fragment did not land in any wall")
+        if len(raw) < 3 * len(merged):
+            raise AssertionError(
+                f"the fixture is not fragmented enough to test merging:"
+                f" {len(raw)} patches, {len(merged)} walls"
+            )
+        # The clicked wall must come back whole, not as the sliver that was hit.
+        if float(clicked['area']) < 0.8 * whole_wall:
+            raise AssertionError(
+                f"the clicked wall stayed fragmented: {clicked['area']:.4f} of"
+                f" {whole_wall:.4f}"
+            )
+
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, settings,
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+            allow_rotation=False, diagnostics=diagnostics,
+        )
+        if delta is None:
+            raise AssertionError(
+                f"a fragmented peg ({cuts} cuts, {wobble} wobble) was refused: "
+                f"{diagnostics[-1] if diagnostics else 'no reason given'}"
+            )
+        assert_matrix_finite(delta)
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1664,6 +1771,8 @@ def main():
     print("thin tabs keep their thin axis: PASS")
     assert_patch_budget_does_not_cut_the_search_short()
     print("patch budget does not cut the search short: PASS")
+    assert_fragmented_walls_are_rebuilt()
+    print("fragmented walls are rebuilt: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

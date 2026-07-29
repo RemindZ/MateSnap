@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.8.0
+
+### Added
+- Connector walls are rebuilt from their fragments. A wall that arrives
+  triangulated, decimated or sculpted comes back as dozens or hundreds of patches
+  whose normals differ by a fraction of a degree -- the growth step will not merge
+  them, because its offset allowance scales with edge length and a finely cut wall
+  has tiny edges. To the pairing rules those fragments were not a wall at all: the
+  click landed on one sliver, every neighbour faced the same way, and the opposite
+  wall sat hundreds of fragments away, further than any affordable search. Patches
+  are now grouped by plane first. Measured on a subdivided, jittered peg: 108
+  patches become 6 walls, and the clicked wall comes back at its full area rather
+  than as the 3% sliver that was hit.
+
+### Fixed
+- Perpendicular walls are no longer paired as opposed ones. Pairing asked only
+  that two normals point away from each other at all, which excludes a clean
+  corner exactly (its dot is zero) but admits a noisy one, whose dot lands either
+  side of zero. Half the corners in a neighbourhood therefore became plausible
+  pairs on 45-degree axes -- crowding out the real walls and, since the search
+  stops at the first radius that yields any pair, stopping it widening to reach
+  the far wall it was looking for. Walls must now be at least 95 degrees apart,
+  the same bar the rotation search already applied.
+
 ## 1.7.6
 
 ### Fixed

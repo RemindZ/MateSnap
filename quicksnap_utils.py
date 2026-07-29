@@ -565,6 +565,13 @@ def compute_precision_fit(context, settings,
     return Vector(tuple(float(value) for value in translation))
 
 
+# Two walls count as opposed only past this opening angle. A bare "their normals
+# point away from each other at all" admits numerically-orthogonal neighbours, which
+# are corners rather than connector walls.
+_WALL_MIN_OPENING = math.radians(95.0)
+_WALL_MAX_OPPOSED_DOT = math.cos(_WALL_MIN_OPENING)
+
+
 def _connector_side_pairs(patches, anchor):
     """Describe clean opposed connector walls at the user's surface hit."""
     anchor = np.array(anchor, dtype=np.float64)
@@ -572,7 +579,14 @@ def _connector_side_pairs(patches, anchor):
     for index, first in enumerate(patches):
         for second in patches[index + 1:]:
             normal_dot = float(first['normal'] @ second['normal'])
-            if normal_dot >= 0.0:
+            # Perpendicular walls are not opposed walls. On clean geometry their
+            # dot is exactly zero and a bare `< 0` excludes them, but a wall with
+            # any modelling noise lands either side of zero, so half of every
+            # corner in the neighbourhood becomes a plausible pair on a 45-degree
+            # axis. They crowd out the real walls and, because the search stops at
+            # the first radius that yields any pair, they also stop it widening to
+            # reach the far wall it was looking for.
+            if normal_dot >= _WALL_MAX_OPPOSED_DOT:
                 continue
             lateral = first['normal'] - second['normal']
             length = float(np.linalg.norm(lateral))
@@ -692,6 +706,101 @@ _CONNECTOR_MIN_WALL_FRACTION = 0.1
 _CONNECTOR_MAX_WALL_PAIRS = 32
 
 
+def _merge_coplanar_patches(patches):
+    """Collapse patches lying on one plane into a single logical wall.
+
+    A wall that arrives triangulated, decimated or sculpted comes back as dozens of
+    fragments whose normals differ by a fraction of a degree. The growth step will
+    not merge them because its offset allowance scales with edge length, and a
+    finely cut wall has tiny edges, so sub-millimetre wobble is enough to stop it.
+
+    To the pairing rules those fragments are not a wall at all: the click lands on
+    one of them, every neighbour faces the same way, and the opposite wall is
+    hundreds of fragments away -- further than any affordable search. Grouping by
+    plane restores the wall the modeller drew, and it is the plane that all the
+    downstream geometry is actually about.
+
+    Tolerances are recomputed from the merged wall: its residual is the real spread
+    of its fragments about the plane, which is a better precision estimate than any
+    single fragment could give.
+    """
+    if len(patches) < 2:
+        return list(patches)
+    points = np.array([patch['point'] for patch in patches], dtype=np.float64)
+    span = float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
+    plane_tolerance = max(0.005 * span, _FIT_ABS_TOL)
+
+    groups = []
+    # Largest first, so a group's plane is anchored on its most reliable member.
+    for patch in sorted(patches, key=lambda item: -float(item['area'])):
+        for group in groups:
+            if float(patch['normal'] @ group['normal']) < _FIT_COS_5:
+                continue
+            offset = float(group['normal'] @ (patch['point'] - group['point']))
+            if abs(offset) > plane_tolerance:
+                continue
+            group['members'].append(patch)
+            break
+        else:
+            groups.append({
+                'normal': np.array(patch['normal'], dtype=np.float64),
+                'point': np.array(patch['point'], dtype=np.float64),
+                'members': [patch],
+            })
+
+    merged = []
+    for group in groups:
+        members = group['members']
+        if len(members) == 1:
+            merged.append(members[0])
+            continue
+        areas = np.array([float(item['area']) for item in members])
+        total = float(areas.sum())
+        if total <= 0.0:
+            continue
+        centres = np.array([item['point'] for item in members], dtype=np.float64)
+        normals = np.array([item['normal'] for item in members], dtype=np.float64)
+        point = (centres * areas[:, None]).sum(axis=0) / total
+        normal = (normals * areas[:, None]).sum(axis=0)
+        length = float(np.linalg.norm(normal))
+        if length <= 1e-12:
+            continue
+        normal /= length
+        spread = float(np.linalg.norm(centres.max(axis=0) - centres.min(axis=0)))
+        extent = spread + max(float(item['extent']) for item in members)
+        if extent <= 0.0:
+            continue
+        residual = float(np.max(np.abs((centres - point) @ normal)))
+        polygons = set()
+        for item in members:
+            polygons |= set(item['polygons'])
+        merged.append({
+            'id': tuple(sorted(polygons)),
+            'polygons': polygons,
+            'point': point,
+            'normal': normal,
+            'area': total,
+            'extent': extent,
+            'residual': residual,
+            'tolerance': max(0.005 * extent, _FIT_ABS_TOL),
+            'fit_tolerance': max(residual, 1e-6 * extent, _FIT_ABS_TOL),
+        })
+    return sorted(merged, key=_patch_sort_key)
+
+
+def _connector_walls(mesh_data, seeds, hops):
+    """The logical walls near a click: patches reached, then merged per plane."""
+    merged = _merge_coplanar_patches(_candidate_patches(mesh_data, seeds, hops))
+    clicked = None
+    if seeds:
+        seed = int(seeds[0])
+        for patch in merged:
+            if seed in patch['polygons']:
+                clicked = patch
+                break
+    return merged, clicked
+
+
 def _connector_pairs(mesh_data, seeds, anchor, label='key'):
     """Opposed wall pairs at a click, widening the search only when it finds none.
 
@@ -704,17 +813,17 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
     Traversal still crosses the trim -- only pairing ignores it -- so a fillet stays
     a stepping stone to the far wall without becoming a wall itself.
     """
-    clicked = _grow_planar_patch(mesh_data, int(seeds[0])) if seeds else None
-    area = 0.0 if clicked is None else float(clicked['area'])
     # Ignoring trim is a preference, not a rule. A connector whose far wall really is
     # much smaller than the clicked one -- or whose clicked patch merged with a large
     # coplanar body face, inflating the floor -- would otherwise be refused outright
     # for the sake of a filter that exists only to keep bevel slivers out.
     searched = (2, 0, False)
     for fraction in (_CONNECTOR_MIN_WALL_FRACTION, 0.0):
-        floor = fraction * area
         for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
-            reached = _candidate_patches(mesh_data, seeds, hops)
+            reached, clicked = _connector_walls(mesh_data, seeds, hops)
+            # Measured against the merged wall, not a fragment of it. A floor set by
+            # one sliver of a cut-up wall admits every other sliver and means nothing.
+            floor = fraction * (0.0 if clicked is None else float(clicked['area']))
             walls = [
                 patch for patch in reached if float(patch['area']) >= floor
             ]
@@ -725,7 +834,7 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                 # below re-admits every sliver, so its pair count measures how
                 # finely the part is cut up, not how round it is -- claiming a
                 # curve from that number would be a confident wrong answer.
-                if floor > 0.0:
+                if fraction > 0.0:
                     return [], (
                         f"the {label} click is on a curved surface -- it offers"
                         f" {len(pairs)} opposed wall pairs where a flat-sided"
@@ -741,10 +850,10 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
             # patches -- so budgeting it by total patch count stopped the walk long
             # before it could cross to the far wall, on exactly the dense parts that
             # need the reach most.
-            if floor <= 0.0 and len(reached) >= _CONNECTOR_MAX_PATCHES:
+            if fraction <= 0.0 and len(reached) >= _CONNECTOR_MAX_PATCHES:
                 searched = (hops, len(reached), True)
                 break
-        if floor <= 0.0:
+        if fraction <= 0.0:
             break
     advice = (
         "click flat on a connector wall, not a rounded or angled face"
@@ -769,11 +878,12 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label='key')
     which reads as evidence and is not. Only ever runs on the failure path.
     """
     hops, total, budget_stopped = searched
-    clicked = _grow_planar_patch(mesh_data, int(seeds[0])) if seeds else None
+    # Describe the merged walls, since those are what pairing was given. Counting
+    # raw fragments would describe a neighbourhood the solver never saw.
+    patches, clicked = _connector_walls(mesh_data, seeds, hops)
     if clicked is None:
         return "the clicked face is not part of a flat patch"
     anchor = np.array(anchor, dtype=np.float64)
-    patches = _candidate_patches(mesh_data, seeds, hops)
     facing = skewed = behind = 0
     for patch in patches:
         if patch['id'] == clicked['id']:
@@ -952,7 +1062,7 @@ def _fit_connector_rotation(correspondences):
 # Pair formation only requires the two walls to face away from each other at all,
 # so numerically-orthogonal neighbours (90.000001 degrees) qualify. They are not
 # opposed connector walls and they inflate the enumeration below quadratically.
-_ROTATION_MIN_OPENING = math.radians(95.0)
+_ROTATION_MIN_OPENING = _WALL_MIN_OPENING
 # Above this many plausible pairs the connector is not the flat-sided kind this
 # feature supports (a faceted round peg reaches dozens), and the enumeration is
 # quadratic in each list. Fail closed rather than freeze the modal.
