@@ -1319,7 +1319,9 @@ def assert_picks_centre_on_their_wall():
         )
 
 
-def make_filleted_pair(segments, bevel=0.06, half=0.5, depth=2.0, clearance=0.06):
+def make_filleted_pair(
+        segments, bevel=0.06, half=0.5, depth=2.0, clearance=0.06,
+        with_body=False):
     """A rectangular peg and socket with filleted edges, the way a kit is modelled.
 
     Each fillet ring inserts another patch hop between a wall and its opposite, which
@@ -1339,6 +1341,18 @@ def make_filleted_pair(segments, bevel=0.06, half=0.5, depth=2.0, clearance=0.06
         return obj
 
     key = block("Key", half, half, depth * 0.5, (6.0, 0.0, 0.0))
+    if with_body:
+        # A peg welded to a body plate, the way a kit part actually arrives.
+        plate = block(
+            "Plate", half * 3, half * 3, depth * 0.125,
+            (6.0, 0.0, -depth * 0.575),
+        )
+        union = key.modifiers.new("union", 'BOOLEAN')
+        union.operation = 'UNION'
+        union.object = plate
+        bpy.context.view_layer.objects.active = key
+        bpy.ops.object.modifier_apply(modifier="union")
+        bpy.data.objects.remove(plate, do_unlink=True)
     lock = block(
         "Lock", (half + clearance) * 2.2, (half + clearance) * 2.2, depth * 0.6,
         (0.0, 0.0, 0.0),
@@ -1392,11 +1406,40 @@ def assert_filleted_connectors_mate():
     nothing. The search now widens when it finds no opposed pair at all.
     """
     settings = SimpleNamespace(ignore_modifiers=True)
-    for segments in (1, 3, 5):
+    for segments, with_body in ((1, False), (3, False), (5, False), (3, True)):
         clear_scene()
         key, key_face, key_hit, lock, lock_face, lock_hit = make_filleted_pair(
-            segments
+            segments, with_body=with_body
         )
+
+        # The fillet strips must stay stepping stones to the far wall, never become
+        # walls themselves. A rounded edge makes dozens of slivers, each forming
+        # plausible opposed pairs on its own diagonal axis; they outnumber the real
+        # walls and crowd them out, because the matcher discards a candidate whose
+        # two best targets tie and near-identical slivers tie constantly.
+        key_data = quicksnap_utils._mesh_fit_data(key)
+        seeds = quicksnap_utils._seed_polygons(key_data, 'FACES', key_face)
+        clicked = quicksnap_utils._grow_planar_patch(key_data, key_face)
+        pairs = quicksnap_utils._connector_pairs(
+            key_data, seeds, np.array(key_hit, dtype=np.float64)
+        )
+        if not pairs:
+            raise AssertionError(
+                f"a {segments}-segment filleted key exposed no wall pair"
+            )
+        if len(pairs) > 8:
+            raise AssertionError(
+                f"a {segments}-segment filleted key produced {len(pairs)} wall"
+                " pairs; fillet slivers are being treated as connector walls"
+            )
+        for pair in pairs:
+            for side in ('low_patch', 'high_patch'):
+                if pair[side]['area'] < 0.1 * clicked['area']:
+                    raise AssertionError(
+                        f"a wall pair is built on a sliver: {pair[side]['area']:.4f}"
+                        f" against a clicked wall of {clicked['area']:.4f}"
+                    )
+
         for allow_rotation in (False, True):
             diagnostics = []
             delta = quicksnap_utils.compute_lock_key_transform(

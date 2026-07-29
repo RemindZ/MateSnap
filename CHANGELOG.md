@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.7.2
+
+### Fixed
+- Fillet strips are no longer mistaken for connector walls. Reaching the far wall
+  of a rounded connector means walking across its trim, which 1.7.1 enabled, but
+  the trim was then treated as mateable geometry. A rounded edge yields dozens of
+  slivers, each a plausible opposed pair on its own diagonal axis, and since the
+  matcher discards a candidate whose two best targets tie, near-identical slivers
+  tie constantly and delete the real wall match. Mates were refused holding a
+  dozen matched pairs, not one of which involved an actual wall. Only patches at
+  least a tenth the area of the clicked one may now form a pair; traversal still
+  crosses the trim. Measured on a filleted peg and socket: 36 key / 89 lock pairs
+  became 2 and 2, and a peg welded to a body plate went from zero matches to two,
+  centred exactly.
+- The widened search now reaches ten hops rather than four. Once trim correctly
+  stops counting as a wall, a 5-segment fillet needs more rings crossed before
+  the real opposite wall comes into view.
+- A click that turns up more than a few dozen opposed pairs fails closed as a
+  curve instead of grinding. Widening let a rounded click reach the far side of
+  its own curvature: a 96-segment sphere produced 1468 pairs and fed a matcher
+  that is quadratic in them. It now yields 21, in 110 ms.
+- The walk also stops after several hundred patches without success, so a dense
+  part cannot be made to grow half its mesh at click time.
+
 ## 1.7.1
 
 ### Fixed

@@ -667,7 +667,24 @@ def clicked_patch_centre(mesh_data, face_index):
 # A plain box peg reaches its far wall in two patch hops. Every chamfer or fillet
 # ring around an edge inserts another one, so a well-modelled connector puts its
 # opposite wall out of reach and the click looks like it landed on nothing at all.
-_CONNECTOR_MAX_HOPS = 4
+_CONNECTOR_MAX_HOPS = 10
+# Hops are cheap to ask for and expensive to grow: each one pulls in a ring of new
+# patches, and growing a patch across a dense flat wall is the single most expensive
+# thing here. Bound the walk by how much it has already turned up rather than by
+# radius alone, so a dense part cannot be made to grow half its mesh.
+_CONNECTOR_MAX_PATCHES = 400
+# Reaching across a fillet is not the same as mating against it. A bevel strip is a
+# sliver next to the wall it softens, and a rounded edge makes a dozen of them, each
+# forming plausible-looking opposed pairs on its own diagonal axis. They outnumber
+# the real walls and crowd them out: the matcher discards a candidate whose two best
+# targets tie, and near-identical bevel strips tie constantly. The click names the
+# wall that matters, so anything far smaller than it is trim, not a connector wall.
+_CONNECTOR_MIN_WALL_FRACTION = 0.1
+# A flat-sided connector has a handful of opposed wall pairs; a rectangular one has
+# three. A rounded click reaches the far side of the curve once the radius is wide
+# enough and produces them by the thousand, which is both meaningless and quadratic
+# in the matcher. Past this many, the click was not on a flat-sided connector.
+_CONNECTOR_MAX_WALL_PAIRS = 32
 
 
 def _connector_pairs(mesh_data, seeds, anchor):
@@ -676,13 +693,33 @@ def _connector_pairs(mesh_data, seeds, anchor):
     Widening costs patches quadratically, so stop at the first radius that sees any
     opposed pair: that is the tightest neighbourhood which still describes the
     connector, and it leaves plain connectors on exactly the patch set they had.
+    Traversal still crosses the trim -- only pairing ignores it -- so a fillet stays
+    a stepping stone to the far wall without becoming a wall itself.
     """
+    clicked = _grow_planar_patch(mesh_data, int(seeds[0])) if seeds else None
+    floor = (
+        0.0 if clicked is None
+        else _CONNECTOR_MIN_WALL_FRACTION * float(clicked['area'])
+    )
     for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
+        reached = _candidate_patches(mesh_data, seeds, hops)
         pairs = _connector_side_pairs(
-            _candidate_patches(mesh_data, seeds, hops), anchor
+            [patch for patch in reached if float(patch['area']) >= floor], anchor
         )
+        if len(pairs) > _CONNECTOR_MAX_WALL_PAIRS:
+            logger.debug(
+                f"Lock and key stopped widening at {hops} hops: {len(pairs)} opposed"
+                f" pairs is a curve, not a flat-sided connector"
+            )
+            return []
         if pairs:
             return pairs
+        if len(reached) >= _CONNECTOR_MAX_PATCHES:
+            logger.debug(
+                f"Lock and key stopped widening at {hops} hops:"
+                f" {len(reached)} patches and still no opposed wall pair"
+            )
+            break
     return []
 
 

@@ -55,7 +55,13 @@ Reuse the existing deterministic helpers:
 
 The clicked patch plus the existing two patch-boundary hops define the local connector. This lets a click on a connector side, tip, or nearby rim reach its other walls without searching the whole object.
 
-Amended 2026-07-29: two hops is the starting radius, not a fixed one. Lock and key widens to at most four when a click yields no opposed wall pair at all, and stops at the first radius that yields one. Two hops reaches the far wall of a plain box peg, but every chamfer or fillet ring around an edge inserts another hop, so a well-modelled connector -- the common case in a real kit -- put its opposite wall permanently out of reach and reported that the click had landed on nothing. Widening costs patches quadratically, so it is only ever done to escape an empty result, and plain connectors keep the exact patch set and cost they had. Standard precision fit is unaffected and stays at two hops.
+Amended 2026-07-29: two hops is the starting radius, not a fixed one. Lock and key widens up to ten when a click yields no opposed wall pair at all, and stops at the first radius that yields one. Two hops reaches the far wall of a plain box peg, but every chamfer or fillet ring around an edge inserts another hop, so a well-modelled connector -- the common case in a real kit -- put its opposite wall permanently out of reach and reported that the click had landed on nothing.
+
+Reaching across trim is not the same as mating against it. Only patches at least a tenth the area of the clicked one may form a pair: traversal still crosses the fillet strips, but a sliver never becomes a connector wall. Without that rule the strips dominate. A rounded edge yields dozens of them, each a plausible opposed pair on its own diagonal axis, and because a candidate whose two best targets tie is discarded as ambiguous, near-identical slivers tie constantly and delete the real wall match. The observed effect was a mate refused for holding thirteen matched pairs, not one of which involved an actual wall.
+
+Two bounds keep the widened walk honest. It stops once it has reached several hundred patches without success, so a dense part cannot be made to grow half its mesh at click time. And a radius that produces more than a few dozen opposed pairs is a curve rather than a flat-sided connector, and fails closed immediately -- a rounded click otherwise reaches the far side of its own curvature and generates them by the thousand, which is meaningless and quadratic in the matcher.
+
+Standard precision fit is unaffected: `_candidate_patches` keeps its two-hop default and its unfiltered patch list.
 
 ### Supported shapes
 
