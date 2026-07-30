@@ -1,6 +1,7 @@
 ﻿import time
 import bmesh
 import bpy
+import datetime
 import json
 import logging
 import numpy as np
@@ -1019,10 +1020,31 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                     hit['location'],
                     f"{label} ({hit['object_name']})",
                 ))
-            logger.warning("\n".join(lines))
+            report = "\n".join(lines)
+            logger.warning(report)
+            path = self.lock_key_log_path()
+            if path is not None:
+                # The console dies with Blender, and a crash while batch-working
+                # dense scenes is exactly when a report is worth keeping.
+                stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                with open(path, 'a', encoding='utf-8') as log_file:
+                    log_file.write(f"\n===== {stamp} =====\n{report}\n")
+                logger.warning(f"Lock and key: report appended to {path}")
         except Exception as error:
             # A diagnostic must never be the thing that breaks the modal.
             logger.debug(f"Lock and key: could not build the refusal report: {error}")
+
+    @staticmethod
+    def lock_key_log_path():
+        """Where refusal reports accumulate: beside the .blend, else in temp."""
+        try:
+            blend = bpy.data.filepath
+            folder = os.path.dirname(blend) if blend else bpy.app.tempdir
+            if not folder or not os.path.isdir(folder):
+                return None
+            return os.path.join(folder, "quicksnap_lock_key_log.txt")
+        except Exception:
+            return None
 
     def reset_lock_key_source(self):
         """Drop the recorded source so the user can genuinely pick it again."""

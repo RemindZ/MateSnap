@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.3
+
+### Added
+- Refusal reports are also appended to `quicksnap_lock_key_log.txt`, next to the
+  .blend when it is saved and in Blender's temp folder otherwise. The console dies
+  with Blender, and a crash part-way through a batch is exactly when the report
+  was worth keeping.
+
+## 1.8.2
+
+### Added
+- A refused mate writes the full geometry behind it to the console: patches
+  reached, walls recovered, which walls face the click and by how much, the
+  separations, and every surviving wall pair. Nothing to run and nothing to
+  reproduce -- open the system console and it is there. The status bar holds one
+  line, and one line has repeatedly turned out to describe the wrong thing.
+
 ## 1.8.1
 
 ### Fixed
@@ -10,13 +27,6 @@
   the pass being described. It now reports the pass whose failure caused the
   refusal, and says when that search reached its full depth, which is the case
   where the facing wall is genuinely further away than a connector should be.
-
-### Added
-- A refused mate now writes the full geometry behind it to the console: patches
-  reached, walls recovered, which walls face the click and by how much, the
-  separations, and every surviving wall pair. Nothing to run and nothing to
-  reproduce -- open the system console and it is there. The status bar holds one
-  line, and one line has repeatedly turned out to describe the wrong thing.
 
 ## 1.8.0
 
