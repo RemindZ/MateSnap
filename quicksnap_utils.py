@@ -699,11 +699,16 @@ _CONNECTOR_MAX_PATCHES = 400
 # targets tie, and near-identical bevel strips tie constantly. The click names the
 # wall that matters, so anything far smaller than it is trim, not a connector wall.
 _CONNECTOR_MIN_WALL_FRACTION = 0.1
-# A flat-sided connector has a handful of opposed wall pairs; a rectangular one has
-# three. A rounded click reaches the far side of the curve once the radius is wide
-# enough and produces them by the thousand, which is both meaningless and quadratic
-# in the matcher. Past this many, the click was not on a flat-sided connector.
-_CONNECTOR_MAX_WALL_PAIRS = 32
+# Curvature is a fact about the wall that was clicked, so it is measured there. A
+# flat-sided connector's wall faces one other wall, or a few in a stepped slot; a
+# rounded one faces half the facets of its own curve. Counting every pair in the
+# neighbourhood instead measures how detailed the surrounding part is -- a socket in
+# a busy part clears any such threshold without being remotely round.
+_CONNECTOR_MAX_CLICKED_PAIRS = 8
+# A separate, far looser guard on total pairs, purely for cost: the matcher is
+# quadratic in them, and a rounded click that reaches its own far side can produce
+# them by the thousand.
+_CONNECTOR_MAX_WALL_PAIRS = 400
 
 
 def _merge_coplanar_patches(patches):
@@ -834,17 +839,25 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
             if fraction > 0.0:
                 searched = (hops, len(reached), False)
             pairs = _connector_side_pairs(walls, anchor)
-            if len(pairs) > _CONNECTOR_MAX_WALL_PAIRS:
+            clicked_pairs = 0 if clicked is None else sum(
+                1 for pair in pairs
+                if pair['low_patch']['id'] == clicked['id']
+                or pair['high_patch']['id'] == clicked['id']
+            )
+            if (
+                clicked_pairs > _CONNECTOR_MAX_CLICKED_PAIRS
+                or len(pairs) > _CONNECTOR_MAX_WALL_PAIRS
+            ):
                 # Only the floored pass can call something a curve. The fallback
-                # below re-admits every sliver, so its pair count measures how
-                # finely the part is cut up, not how round it is -- claiming a
-                # curve from that number would be a confident wrong answer.
+                # below re-admits every sliver, so its counts measure how finely the
+                # part is cut up, not how round it is -- claiming a curve from those
+                # numbers would be a confident wrong answer.
                 if fraction > 0.0:
                     return [], (
-                        f"the {label} click is on a curved surface -- it offers"
-                        f" {len(pairs)} opposed wall pairs where a flat-sided"
-                        " connector has a handful, and rounded connectors are not"
-                        " supported"
+                        f"the {label} click is on a curved surface -- the wall you"
+                        f" clicked is faced by {clicked_pairs} others, where a"
+                        " flat-sided connector's wall faces one or a few, and"
+                        " rounded connectors are not supported"
                     )
                 break
             if pairs:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.8.4
+
+### Fixed
+- A flat socket in a detailed part is no longer called a curve. Curvature was
+  judged from the total number of opposed wall pairs in the neighbourhood, but
+  pairing runs over every wall against every other, so that count tracks how
+  detailed the surrounding geometry is rather than how round the connector is --
+  a perfectly flat socket reported 36 where the limit was 32. It is now judged at
+  the wall that was actually clicked: a flat-sided wall faces one other, or a few
+  in a stepped slot, where a rounded one faces half the facets of its own curve.
+  A 32-sided cylinder still fails closed, now reported as "faced by 15 others".
+
 ## 1.8.3
 
 ### Added

@@ -1728,6 +1728,48 @@ def assert_fragmented_walls_are_rebuilt():
         assert_matrix_finite(delta)
 
 
+def assert_curvature_is_judged_at_the_click():
+    """Only the clicked wall decides whether a click is on a curve.
+
+    Pairing runs over every wall in the neighbourhood, so the total pair count
+    tracks how detailed the surrounding part is, not how round the connector is: a
+    flat socket in a busy part clears any such threshold without being remotely
+    curved. A flat-sided wall faces one other wall, or a few in a stepped slot; a
+    rounded one faces half the facets of its own curve.
+    """
+    def pairs_at(obj, face, hit):
+        data = quicksnap_utils._mesh_fit_data(obj)
+        seeds = quicksnap_utils._seed_polygons(data, 'FACES', face)
+        return quicksnap_utils._connector_pairs(
+            data, seeds, np.array(hit, dtype=np.float64), 'lock'
+        )
+
+    # A flat socket cut into a finely divided block: many walls in reach, but the
+    # clicked wall still faces just its opposite.
+    clear_scene()
+    _, _, _, lock, lock_face, lock_hit = make_fragmented_pair(3, 0.002)
+    pairs, reason = pairs_at(lock, lock_face, lock_hit)
+    if reason and "curved surface" in reason:
+        raise AssertionError(f"a flat socket was called a curve: {reason}")
+    if not pairs:
+        raise AssertionError(f"a flat socket found no wall pair: {reason}")
+
+    # A genuinely round connector must still fail closed.
+    clear_scene()
+    bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=0.5, depth=2.0)
+    cylinder = bpy.context.active_object
+    side = min(
+        (p.index for p in cylinder.data.polygons if abs(p.normal.z) < 0.1),
+        key=lambda index: cylinder.data.polygons[index].center.x,
+    )
+    _, reason = pairs_at(
+        cylinder, side,
+        cylinder.matrix_world @ cylinder.data.polygons[side].center,
+    )
+    if not reason or "curved surface" not in reason:
+        raise AssertionError(f"a round connector was not refused: {reason!r}")
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1775,6 +1817,8 @@ def main():
     print("patch budget does not cut the search short: PASS")
     assert_fragmented_walls_are_rebuilt()
     print("fragmented walls are rebuilt: PASS")
+    assert_curvature_is_judged_at_the_click()
+    print("curvature judged at the click: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()
