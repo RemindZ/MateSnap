@@ -1770,6 +1770,38 @@ def assert_curvature_is_judged_at_the_click():
         raise AssertionError(f"a round connector was not refused: {reason!r}")
 
 
+def assert_alignment_refusal_reports_how_far_off():
+    """"None facing each other" must say by how much.
+
+    Over a thousand tried combinations, the count alone cannot distinguish a part
+    that is a few degrees out from one that is structurally unrelated, and those
+    want opposite advice.
+    """
+    settings = SimpleNamespace(ignore_modifiers=True)
+    for degrees in (8.0, 20.0):
+        clear_scene()
+        key, key_face, _, lock, lock_face, lock_hit = make_key_lock()
+        key.rotation_euler = Euler((0.0, 0.0, math.radians(degrees)))
+        bpy.context.view_layer.update()
+        key_hit = key.matrix_world @ Vector((-0.5, 0.0, -0.3))
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, settings,
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+            allow_rotation=False, diagnostics=diagnostics,
+        )
+        if delta is not None:
+            raise AssertionError(f"a {degrees} degree tilt should not translate-mate")
+        message = diagnostics[-1]
+        if "nearest combination is" not in message:
+            raise AssertionError(f"no near-miss reported: {message!r}")
+        reported = float(message.split("nearest combination is ")[1].split()[0])
+        if abs(reported - degrees) > 0.5:
+            raise AssertionError(
+                f"a {degrees} degree tilt was reported as {reported}: {message!r}"
+            )
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1819,6 +1851,8 @@ def main():
     print("fragmented walls are rebuilt: PASS")
     assert_curvature_is_judged_at_the_click()
     print("curvature judged at the click: PASS")
+    assert_alignment_refusal_reports_how_far_off()
+    print("alignment refusal reports how far off: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

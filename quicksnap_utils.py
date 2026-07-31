@@ -1508,6 +1508,31 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
     return lines
 
 
+def _closest_orientation_miss(source_pairs, target_pairs):
+    """The combination that came nearest to facing, and by how much it missed.
+
+    "None facing each other" over a thousand combinations says nothing about
+    whether the parts are a few degrees out or structurally unrelated, and those
+    want opposite advice. Returns (axis degrees apart, worst wall angle from
+    anti-parallel), or None when either side has no pairs.
+    """
+    best = None
+    for source in source_pairs:
+        for target in target_pairs:
+            axis = math.degrees(math.acos(abs(float(
+                np.clip(source['axis'] @ target['axis'], -1.0, 1.0)
+            ))))
+            walls = max(
+                180.0 - math.degrees(math.acos(float(np.clip(
+                    source[side]['normal'] @ target[side]['normal'], -1.0, 1.0
+                ))))
+                for side in ('low_patch', 'high_patch')
+            )
+            if best is None or axis + walls < best[0] + best[1]:
+                best = (axis, walls)
+    return best
+
+
 def _note_lock_key_skip(diagnostics, message):
     """Record why a mate was refused.
 
@@ -1587,12 +1612,17 @@ def compute_lock_key_transform(
             # Distinguish that from parts that face each other but do not fit.
             facing = _orientation_compatible_pairs(source_pairs, target_pairs)
             if not facing:
+                miss = _closest_orientation_miss(source_pairs, target_pairs)
+                nearest = "" if miss is None else (
+                    f"; nearest combination is {miss[0]:.1f} degrees off on the"
+                    f" wall direction and {miss[1]:.1f} degrees from facing"
+                )
                 _note_lock_key_skip(
                     diagnostics,
                     "the key is not aligned with the lock -- turn on 'Rotate key to"
                     " match lock', or rotate the key roughly into place first"
                     f" ({len(source_pairs)} key / {len(target_pairs)} lock wall"
-                    " pairs, none facing each other)")
+                    f" pairs, none facing each other{nearest})")
             else:
                 # Report the near-miss that came closest to fitting, with both
                 # measurements: "wider than" alone leaves the user unable to tell a

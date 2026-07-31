@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.5
+
+### Changed
+- "None facing each other" now says by how much the nearest combination missed,
+  in degrees on the wall direction and degrees from facing. The count of tried
+  combinations cannot distinguish a part a few degrees out of true from one that
+  is structurally unrelated, and those want opposite advice.
+
 ## 1.8.4
 
 ### Fixed
