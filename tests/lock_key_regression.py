@@ -1802,6 +1802,28 @@ def assert_alignment_refusal_reports_how_far_off():
             )
 
 
+def assert_search_widens_for_a_second_axis():
+    """The search must not stop at whichever single wall pair it saw first.
+
+    Centring wants two independent lateral directions and rotation flatly requires
+    them, so returning the first pair found leaves rotation refusing "needs two
+    independent wall pairs" on parts that plainly have them a hop further out.
+    """
+    clear_scene()
+    key, key_face, key_hit, _, _, _ = make_fragmented_pair(3, 0.002)
+    data = quicksnap_utils._mesh_fit_data(key)
+    seeds = quicksnap_utils._seed_polygons(data, 'FACES', key_face)
+    pairs, reason = quicksnap_utils._connector_pairs(
+        data, seeds, np.array(key_hit, dtype=np.float64), 'key'
+    )
+    axes = quicksnap_utils._independent_axis_count(pairs)
+    if axes < 2:
+        raise AssertionError(
+            f"the search stopped on {axes} independent axis/axes"
+            f" ({len(pairs)} pairs): {reason}"
+        )
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1853,6 +1875,8 @@ def main():
     print("curvature judged at the click: PASS")
     assert_alignment_refusal_reports_how_far_off()
     print("alignment refusal reports how far off: PASS")
+    assert_search_widens_for_a_second_axis()
+    print("search widens for a second axis: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

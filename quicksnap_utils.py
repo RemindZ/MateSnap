@@ -793,6 +793,17 @@ def _merge_coplanar_patches(patches):
     return sorted(merged, key=_patch_sort_key)
 
 
+def _independent_axis_count(pairs):
+    """How many distinct lateral directions these pairs actually constrain."""
+    axes = []
+    for pair in pairs:
+        if not any(
+            abs(float(pair['axis'] @ axis)) >= _FIT_COS_5 for axis in axes
+        ):
+            axes.append(pair['axis'])
+    return len(axes)
+
+
 def _connector_walls(mesh_data, seeds, hops):
     """The logical walls near a click: patches reached, then merged per plane."""
     merged = _merge_coplanar_patches(_candidate_patches(mesh_data, seeds, hops))
@@ -823,6 +834,7 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
     # coplanar body face, inflating the floor -- would otherwise be refused outright
     # for the sake of a filter that exists only to keep bevel slivers out.
     searched = (2, 0, False)
+    best = []
     for fraction in (_CONNECTOR_MIN_WALL_FRACTION, 0.0):
         for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
             reached, clicked = _connector_walls(mesh_data, seeds, hops)
@@ -860,8 +872,15 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                         " rounded connectors are not supported"
                     )
                 break
-            if pairs:
-                return pairs, None
+            # Returning at the first radius that yields any pair hands back
+            # whichever single wall pair came into view first. Centring wants two
+            # independent lateral directions and rotation flatly requires them, so
+            # keep widening until the picture is complete -- while keeping the best
+            # seen, since a slot legitimately constrains only one direction.
+            if _independent_axis_count(pairs) > _independent_axis_count(best):
+                best = pairs
+            if _independent_axis_count(best) >= 2:
+                return best, None
             # The patch budget guards the unfloored fallback, whose pairing is
             # quadratic in every sliver it re-admits. The floored pass only ever
             # pairs substantial walls -- a handful even on a part with thousands of
@@ -872,6 +891,8 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                 break
         if fraction <= 0.0:
             break
+    if best:
+        return best, None
     advice = (
         "click flat on a connector wall, not a rounded or angled face"
         if label == 'key' else "click flat on an inner wall of the socket"

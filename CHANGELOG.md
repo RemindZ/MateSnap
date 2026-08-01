@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.6
+
+### Fixed
+- The wall search no longer stops at whichever single pair it saw first. Centring
+  wants two independent lateral directions and rotation flatly requires them, so
+  returning the first pair found made "Rotate key to match lock" refuse with
+  "needs two independent wall pairs" on parts that plainly have them one hop
+  further out. It now keeps widening until it has two, while keeping the best it
+  has seen -- a slot legitimately constrains only one direction. Measured on a
+  fragmented peg: one pair became three, and rotation reaches the solver.
+
 ## 1.8.5
 
 ### Changed
