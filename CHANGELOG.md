@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.8.7
+
+### Added
+- Clicking the flat face two halves meet on is now named as such. On a split
+  figurine that plane looks like the obvious thing to click, but it has no
+  opposite wall, so the solver fell back on whatever incidental detail was nearby
+  and reported an angle between two things that were never connector walls -- a
+  number that reads as a measurement and is not. The refusal now says the wall you
+  clicked measures X, the biggest wall facing it measures Y, and to click the side
+  of the peg or the inner wall of the socket instead.
+
+### Changed
+- Curvature counts only facing walls of comparable size. A flat peg standing on an
+  organic body is faced by a crowd of body facets far smaller than itself, and
+  counting those called the peg a curve.
+
 ## 1.8.6
 
 ### Fixed

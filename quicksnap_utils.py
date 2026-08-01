@@ -705,6 +705,9 @@ _CONNECTOR_MIN_WALL_FRACTION = 0.1
 # neighbourhood instead measures how detailed the surrounding part is -- a socket in
 # a busy part clears any such threshold without being remotely round.
 _CONNECTOR_MAX_CLICKED_PAIRS = 8
+# How large a facing wall must be, relative to the clicked one, to count as a peer
+# rather than as incidental detail. A curve's facets are all of a size.
+_CONNECTOR_PEER_FRACTION = 0.5
 # A separate, far looser guard on total pairs, purely for cost: the matcher is
 # quadratic in them, and a rounded click that reaches its own far side can produce
 # them by the thousand.
@@ -851,10 +854,17 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
             if fraction > 0.0:
                 searched = (hops, len(reached), False)
             pairs = _connector_side_pairs(walls, anchor)
+            # Count only partners of comparable size. A curve's facets are all much
+            # the same area, so a rounded click is faced by many of them; a flat peg
+            # standing on an organic body is faced by a crowd of body facets far
+            # smaller than itself, and counting those calls the peg a curve.
             clicked_pairs = 0 if clicked is None else sum(
                 1 for pair in pairs
-                if pair['low_patch']['id'] == clicked['id']
-                or pair['high_patch']['id'] == clicked['id']
+                for side, other in (('low_patch', 'high_patch'),
+                                    ('high_patch', 'low_patch'))
+                if pair[side]['id'] == clicked['id']
+                and float(pair[other]['area'])
+                >= _CONNECTOR_PEER_FRACTION * float(clicked['area'])
             )
             if (
                 clicked_pairs > _CONNECTOR_MAX_CLICKED_PAIRS
@@ -1554,6 +1564,47 @@ def _closest_orientation_miss(source_pairs, target_pairs):
     return best
 
 
+# A connector wall faces another wall of comparable size -- that is what makes it a
+# connector. A parting plane, a base or a body face has nothing facing it, and the
+# only candidates are incidental detail orders of magnitude smaller.
+_CONNECTOR_MIN_FACING_FRACTION = 0.02
+
+
+def _clicked_wall_is_not_a_connector(mesh_data, seeds, anchor, label):
+    """A refusal for a click on a big flat face rather than on a connector.
+
+    This is the commonest way to misread the feature: on a split figurine the two
+    halves meet at a parting plane, and clicking that plane looks entirely
+    reasonable. It has no opposite wall, so the solver falls back on whatever
+    incidental detail is nearby and then reports an angle between two things that
+    were never connector walls. Returns None when the click does have a real
+    opposite and the ordinary refusals should speak instead.
+    """
+    walls, clicked = _connector_walls(mesh_data, seeds, _CONNECTOR_MAX_HOPS)
+    if clicked is None:
+        return None
+    area = float(clicked['area'])
+    if area <= 0.0:
+        return None
+    facing = [
+        float(wall['area']) for wall in walls
+        if wall['id'] != clicked['id']
+        and float(wall['normal'] @ clicked['normal']) < _WALL_MAX_OPPOSED_DOT
+    ]
+    biggest = max(facing) if facing else 0.0
+    # Nothing facing at all is a different story -- the opposite wall may simply be
+    # out of reach -- and the reach message says that better than this one would.
+    if biggest <= 0.0 or biggest >= _CONNECTOR_MIN_FACING_FRACTION * area:
+        return None
+    return (
+        f"the {label} click is on a large flat face rather than a connector -- the"
+        f" wall you clicked measures {area:.4g} and the biggest wall facing it"
+        f" measures {biggest:.4g}, so there is nothing here to mate into. On a"
+        " split part, click the side of the peg or the inner wall of the socket,"
+        " not the flat face they sit on"
+    )
+
+
 def _note_lock_key_skip(diagnostics, message):
     """Record why a mate was refused.
 
@@ -1622,10 +1673,24 @@ def compute_lock_key_transform(
             Vector(tuple(float(value) for value in translation))
         )
     if not allow_rotation:
-        if not source_pairs:
+        not_a_connector = (
+            _clicked_wall_is_not_a_connector(
+                source_data, source_seeds, source_anchor, 'key')
+            or _clicked_wall_is_not_a_connector(
+                target_data, target_seeds, target_anchor, 'lock')
+        )
+        if not_a_connector is not None:
+            _note_lock_key_skip(diagnostics, not_a_connector)
+        elif not source_pairs:
             _note_lock_key_skip(diagnostics, source_reason)
         elif not target_pairs:
             _note_lock_key_skip(diagnostics, target_reason)
+        # Both clicks produced pairs, so nothing here is merely out of reach --
+        # which makes it worth asking whether either click was on a connector at
+        # all. Reporting an angle between two walls that were never connector walls
+        # is worse than useless: it reads as a measurement.
+        elif not_a_connector is not None:
+            _note_lock_key_skip(diagnostics, not_a_connector)
         elif not matches:
             # Matching needs the walls anti-parallel within 10 degrees and the
             # lateral axes aligned within 5, so a key that is not already rotated

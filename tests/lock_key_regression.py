@@ -1824,6 +1824,82 @@ def assert_search_widens_for_a_second_axis():
         )
 
 
+def assert_parting_plane_click_is_named():
+    """Clicking the flat face two halves meet on must say so.
+
+    The commonest way to misread the feature. That plane has no opposite wall, so
+    the solver falls back on whatever incidental detail is nearby and reports an
+    angle between two things that were never connector walls -- which reads as a
+    measurement and sent several rounds of diagnosis the wrong way.
+    """
+    def dome_half(name, location, peg):
+        """An organic half with one flat parting plane carrying a connector.
+
+        Unlike a plate it has no parallel back face, so the parting plane has
+        nothing facing it -- which is the shape in the reported log.
+        """
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            segments=96, ring_count=48, radius=40, location=location)
+        blob = bpy.context.active_object
+        blob.name = name
+        bpy.ops.mesh.primitive_cube_add(
+            size=2.0, location=(location[0], location[1], location[2] + 40))
+        cutter = bpy.context.active_object
+        cutter.scale = (60, 60, 40)
+        bpy.ops.object.transform_apply(
+            location=False, rotation=False, scale=True)
+        modifier = blob.modifiers.new("cut", 'BOOLEAN')
+        modifier.operation = 'DIFFERENCE'
+        modifier.object = cutter
+        bpy.context.view_layer.objects.active = blob
+        bpy.ops.object.modifier_apply(modifier="cut")
+        bpy.data.objects.remove(cutter, do_unlink=True)
+        # The connector itself, so the neighbourhood yields wall pairs exactly as a
+        # real part does -- the point is that the *plane* is not one of them.
+        bpy.ops.mesh.primitive_cube_add(
+            size=2.0,
+            location=(location[0], location[1], location[2] + (2 if peg else -2)),
+        )
+        tool = bpy.context.active_object
+        tool.scale = (3.0, 3.0, 4.0) if peg else (3.36, 3.36, 4.0)
+        bpy.ops.object.transform_apply(
+            location=False, rotation=False, scale=True)
+        modifier = blob.modifiers.new("connector", 'BOOLEAN')
+        modifier.operation = 'UNION' if peg else 'DIFFERENCE'
+        modifier.object = tool
+        bpy.context.view_layer.objects.active = blob
+        bpy.ops.object.modifier_apply(modifier="connector")
+        bpy.data.objects.remove(tool, do_unlink=True)
+        bpy.context.view_layer.update()
+        return blob
+
+    def flat_top(obj):
+        return max(
+            (p.index for p in obj.data.polygons if p.normal.z > 0.95),
+            key=lambda index: obj.data.polygons[index].area,
+        )
+
+    clear_scene()
+    lower = dome_half("Lower", (0.0, 0.0, 0.0), peg=True)
+    upper = dome_half("Upper", (150.0, 0.0, 0.0), peg=False)
+    key_face, lock_face = flat_top(lower), flat_top(upper)
+    diagnostics = []
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        lower.name, key_face,
+        lower.matrix_world @ lower.data.polygons[key_face].center,
+        upper.name, lock_face,
+        upper.matrix_world @ upper.data.polygons[lock_face].center,
+        allow_rotation=False, diagnostics=diagnostics,
+    )
+    if delta is not None:
+        raise AssertionError("two flat faces have no lateral constraint to mate on")
+    if "large flat face rather than a connector" not in diagnostics[-1]:
+        raise AssertionError(
+            f"a parting-plane click was not named as one: {diagnostics[-1]!r}"
+        )
+
+
 def main():
     run_lock_key_case()
     print("straight translation: PASS")
@@ -1877,6 +1953,8 @@ def main():
     print("alignment refusal reports how far off: PASS")
     assert_search_widens_for_a_second_axis()
     print("search widens for a second axis: PASS")
+    assert_parting_plane_click_is_named()
+    print("parting plane click is named: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()
