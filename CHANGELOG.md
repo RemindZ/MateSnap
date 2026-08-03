@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.8.11
+
+### Fixed
+Post-snap precision fit now uses Lock and key's wall-finding, and inherits the
+two fixes that came out of it:
+
+- **Fragmented walls are rebuilt.** A wall that arrives triangulated, decimated
+  or sculpted comes back as dozens of fragments whose normals differ by a
+  fraction of a degree, and they do not merely go unrecognised -- each pairs with
+  each fragment opposite, and the matcher discards a candidate whose two best
+  targets tie, so the axis is deleted outright. Measured on a socket wall cut
+  into 64 quads with 0.002 of wobble: 55 patches, 600 competing pairs on that
+  axis, no fit at all. Grouped by plane: 5 walls, and the fit lands.
+- **Snug fits are no longer refused.** Separation and clearance were judged
+  against the flatness allowance, which is 0.5% of a patch's extent -- roughly 2%
+  clearance demanded on a 10-unit peg, far more than a printed fit has, and on a
+  broad thin tab more than the tab's own thickness. Both now use the
+  precision-based tolerance, as Lock and key already did.
+
+Lock and key's trim floor and widening search are deliberately not adopted: the
+floor is measured against the wall that was *clicked*, and a snap element usually
+sits on a body face, where it deleted the socket walls themselves.
+
 ## 1.8.10
 
 ### Added

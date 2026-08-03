@@ -124,13 +124,17 @@ Candidate patches are:
 
 Two hops let a face-center snap traverse `side -> end/rim -> opposite side`; point and edge snaps usually need only one. The later slab and pair-matching checks reject unrelated boundaries reached through a large coplanar patch.
 
+Amended 2026-08-03: candidate patches are grouped by plane before pairing, exactly as Lock and key does. A wall that arrives triangulated, decimated or sculpted comes back as dozens of fragments whose normals differ by a fraction of a degree; the growth step will not merge them because its offset allowance scales with edge length. Those fragments do not merely go unrecognised, they delete the axis: each pairs with each fragment opposite, and a candidate whose two best targets tie is discarded as ambiguous. Measured on a socket wall cut into 64 quads with 0.002 of wobble: 55 patches, 600 competing pairs on the axis, no match at all; grouped by plane, 5 walls, and the exact fit.
+
+Lock and key's trim floor is deliberately **not** adopted here. It is measured against the wall that was clicked, and a snap element usually sits on a body face instead -- measured against that, the floor deleted the socket walls themselves. Nor is its widening walk: that is affordable because it is a deliberate two-click action, where this runs after every snap.
+
 ### Opposed plane pairs
 
 Within each mesh, form a pair only when:
 
 - the patch normals are at least 170 degrees apart (`dot <= cos(170 degrees)`);
 - both patches pass their flatness test;
-- their plane separation is positive and greater than both flatness tolerances;
+- their plane separation is positive and greater than the combined precision tolerance (amended 2026-08-03: the flatness allowance is 0.5% of a patch's extent, so on a broad thin tab it exceeds the tab's own thickness and discarded the one pair that mattered -- the same mistake, and the same fix, as Lock and key);
 - the snapped point's projection lies inside the closed slab between the planes, plus flatness tolerance;
 - neither patch has zero area or extent.
 
@@ -142,7 +146,7 @@ Match a source pair to a target pair only when:
 
 - their canonical axes differ by at most 5 degrees;
 - each source face normal opposes its spatially corresponding target face normal by at least 170 degrees;
-- target separation is strictly larger than source separation after flatness tolerance;
+- target separation is strictly larger than source separation after the combined precision tolerance (amended 2026-08-03: judged against how precisely the planes are defined, not how large they are -- the flatness allowance demands roughly 2% clearance on a 10-unit peg, which is far more than a printed fit has);
 - both pair slabs contain the snapped point;
 - the target pair midpoint is the closest qualifying midpoint to the snapped point.
 

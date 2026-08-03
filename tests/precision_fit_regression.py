@@ -209,6 +209,10 @@ def synthetic_pair(axis, low, high, tolerance, center, inward=False):
         'center': np.array(center, dtype=np.float64),
         'separation': high - low,
         'tolerance': tolerance,
+        # These fixtures exist to pin the ambiguity rules, which read `tolerance`.
+        # Keeping the two equal leaves the clearance gate deciding exactly what it
+        # decided before it was moved onto the precision-based value.
+        'fit_tolerance': tolerance,
     }
 
 
@@ -407,6 +411,68 @@ def run_modifier_case(ignore_modifiers):
     )
 
 
+def assert_fragmented_walls_are_rebuilt():
+    """A finely cut, slightly wobbly wall must still read as one wall.
+
+    Lock and key learned this first: the growth step's offset allowance scales with
+    edge length, so a wall cut this fine stops merging on sub-millimetre wobble and
+    arrives as dozens of fragments. To the pairing rules those are not a wall at
+    all, and precision fit simply gave up on any decimated or sculpted part.
+    """
+    clear_scene()
+    peg, peg_seed = make_peg()
+    socket, socket_seed = make_socket(subdivisions=8)
+    moved = 0
+    for vertex in socket.data.vertices:
+        if abs(vertex.co.x) > 0.59 and -1.19 < vertex.co.z < -0.01:
+            vertex.co.x += 0.002 * (vertex.index % 3 - 1)
+            moved += 1
+    if not moved:
+        raise AssertionError("the fixture wobbled nothing")
+    socket.data.update()
+    bpy.context.view_layer.update()
+    contact = np.array(socket.matrix_world @ socket.data.vertices[socket_seed].co)
+    peg_data = quicksnap_utils._mesh_fit_data(peg)
+    peg_seeds = quicksnap_utils._seed_polygons(peg_data, 'POINTS', peg_seed)
+    socket_data = quicksnap_utils._mesh_fit_data(socket)
+    socket_seeds = quicksnap_utils._seed_polygons(socket_data, 'POINTS', socket_seed)
+
+    def centres_x(gather):
+        matches = quicksnap_utils._match_plane_pairs(
+            quicksnap_utils._plane_pairs(gather(peg_data, peg_seeds), contact),
+            quicksnap_utils._plane_pairs(gather(socket_data, socket_seeds), contact),
+            contact,
+        )
+        return any(abs(float(match['axis'][0])) > 0.99 for match in matches)
+
+    # Fragments do not merely go unrecognised, they actively delete the axis: each
+    # one pairs with each fragment opposite, and a candidate whose two best targets
+    # tie is discarded as ambiguous. Measured here: 55 patches, 600 competing X
+    # pairs, no X match at all.
+    if centres_x(quicksnap_utils._candidate_patches):
+        raise AssertionError("the fixture is not fragmented; the test proves nothing")
+    if not centres_x(quicksnap_utils._fit_walls):
+        raise AssertionError("merging did not rebuild the wobbly wall")
+    # The rebuilt plane is the area-weighted average of the fragments, so it lands
+    # within a fraction of the wobble rather than exactly on it: 8e-6 recovered
+    # from a wobble of 0.002.
+    assert_vector_close(
+        run_pair(peg, peg_seed, socket, socket_seed),
+        Vector((0.1, 0.1, 0.0)),
+        tolerance=1e-4,
+    )
+
+
+def run_snug_clearance_case():
+    clear_scene()
+    peg, peg_seed = make_peg()
+    # A printed fit, not a modelling allowance: 1% on a 1-unit peg. The flatness
+    # allowance is 0.5% of a patch's extent and was being used as the clearance
+    # test, so it demanded roughly twice this and refused every snug connector.
+    socket, socket_seed = make_socket(x_bounds=(-0.61, 0.40), y_bounds=(-0.71, 0.50))
+    return run_pair(peg, peg_seed, socket, socket_seed)
+
+
 def main():
     assert_overlapping_target_ambiguity_rejected()
     print("target ambiguity: PASS")
@@ -440,6 +506,12 @@ def main():
     print("impossible fits: PASS")
     assert run_stale_index_case() is None
     print("stale index: PASS")
+    assert_vector_close(
+        run_snug_clearance_case(), Vector((-0.005, -0.005, 0.0)), tolerance=1e-7
+    )
+    print("snug printed clearance: PASS")
+    assert_fragmented_walls_are_rebuilt()
+    print("fragmented walls are rebuilt: PASS")
     assert_vector_close(run_neighboring_socket_case(), Vector((0.1, 0.1, 0.0)), tolerance=1e-7)
     print("neighboring socket: PASS")
     scaled = run_non_uniform_scale_case(apply_scale=False)

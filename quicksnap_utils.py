@@ -418,9 +418,14 @@ def _plane_pairs(patches, contact):
                 low, high = second, first
                 low_d, high_d = second_d, first_d
             tolerance = first['tolerance'] + second['tolerance']
+            fit_tolerance = first['fit_tolerance'] + second['fit_tolerance']
             separation = high_d - low_d
             contact_d = float(axis @ contact)
-            if separation <= tolerance:
+            # Whether a separation is real is a question about precision, not about
+            # patch size. The flatness allowance is 0.5% of a patch's extent, so on
+            # a broad thin tab it exceeds the tab's own thickness and discards the
+            # one pair that matters. Same mistake, same fix as Lock and key.
+            if separation <= fit_tolerance:
                 continue
             if contact_d < low_d - tolerance or contact_d > high_d + tolerance:
                 continue
@@ -434,6 +439,7 @@ def _plane_pairs(patches, contact):
                 'center': 0.5 * (low['point'] + high['point']),
                 'separation': separation,
                 'tolerance': tolerance,
+                'fit_tolerance': fit_tolerance,
             })
     return sorted(pairs, key=lambda pair: tuple(np.round(pair['axis'], 9)) + (round(pair['mid'], 9),))
 
@@ -452,7 +458,10 @@ def _match_plane_pairs(source_pairs, target_pairs, contact):
                 continue
             tolerance = source['tolerance'] + target['tolerance']
             clearance = target['separation'] - source['separation']
-            if clearance <= tolerance:
+            # Judge the clearance against how precisely the planes are defined, not
+            # against how large they are: the flatness allowance demands roughly 2%
+            # clearance on a 10-unit peg, which is far more than a printed fit has.
+            if clearance <= source['fit_tolerance'] + target['fit_tolerance']:
                 continue
             delta = target['mid'] - source['mid']
             if abs(delta) > min(0.25 * source['separation'], 2.0 * clearance) + tolerance:
@@ -525,6 +534,24 @@ def _validate_pair_translation(matches, translation):
     return True
 
 
+def _fit_walls(mesh_data, seeds):
+    """The logical walls around a snap element, as Lock and key sees them.
+
+    A wall that arrives triangulated, decimated or sculpted comes back as dozens
+    of fragments whose normals differ by a fraction of a degree, and to the pairing
+    rules those fragments are not a wall at all: the seed lands on one of them,
+    every neighbour faces the same way, and the opposite wall is hundreds of
+    fragments away. Grouping by plane restores the wall the modeller drew.
+
+    Lock and key's other two habits do not transfer. Its trim floor is measured
+    against the wall that was clicked, and a snap element usually sits on a body
+    face instead -- measured against that, the floor deleted the socket walls
+    themselves. And its widening walk is affordable because it is a deliberate
+    two-click action; this runs after every snap.
+    """
+    return _merge_coplanar_patches(_candidate_patches(mesh_data, seeds))
+
+
 def compute_precision_fit(context, settings,
                           source_object_name, source_snap_type, source_element_index,
                           target_object_name, target_snap_type, target_element_index,
@@ -551,8 +578,8 @@ def compute_precision_fit(context, settings,
     if not source_seeds or not target_seeds:
         logger.debug("Precision fit skipped: snap element is stale or unsupported")
         return None
-    source_patches = _candidate_patches(source_data, source_seeds)
-    target_patches = _candidate_patches(target_data, target_seeds)
+    source_patches = _fit_walls(source_data, source_seeds)
+    target_patches = _fit_walls(target_data, target_seeds)
     source_pairs = _plane_pairs(source_patches, contact)
     target_pairs = _plane_pairs(target_patches, contact)
     matches = _match_plane_pairs(source_pairs, target_pairs, contact)
