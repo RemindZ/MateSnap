@@ -208,6 +208,8 @@ def synthetic_pair(axis, low, high, tolerance, center, inward=False):
         'mid': 0.5 * (low + high),
         'center': np.array(center, dtype=np.float64),
         'separation': high - low,
+        # Exactly opposed: these fixtures are about ambiguity, not about taper.
+        'opening_angle': math.pi,
         'tolerance': tolerance,
         # These fixtures exist to pin the ambiguity rules, which read `tolerance`.
         # Keeping the two equal leaves the clearance gate deciding exactly what it
@@ -411,6 +413,66 @@ def run_modifier_case(ignore_modifiers):
     )
 
 
+def make_tapered_pair(taper_degrees=8.0):
+    """A drafted peg and its drafted socket -- the shape every printed part has."""
+    slope = math.tan(math.radians(taper_degrees))
+
+    def box(x_low, x_high, y_low, y_high, depth):
+        inset = slope * depth
+        return [
+            (x_low + inset, y_low + inset, -depth),
+            (x_high - inset, y_low + inset, -depth),
+            (x_high - inset, y_high - inset, -depth),
+            (x_low + inset, y_high - inset, -depth),
+            (x_low, y_low, 0.0), (x_high, y_low, 0.0),
+            (x_high, y_high, 0.0), (x_low, y_high, 0.0),
+        ]
+
+    peg = make_mesh(
+        "TaperedPeg", box(-0.6, 0.4, -0.7, 0.5, 1.0),
+        [(0, 3, 2, 1), (4, 5, 6, 7),
+         (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)],
+    )
+    walls = box(-0.6, 0.6, -0.7, 0.7, 1.2)
+    socket = make_mesh(
+        "TaperedSocket", walls[4:] + walls[:4],
+        [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3)],
+    )
+    bpy.context.view_layer.update()
+    return peg, 4, socket, 0
+
+
+def assert_drafted_connectors_centre():
+    """Draft is not a defect, it is how the part comes out of the mould.
+
+    Precision fit demanded the two walls be within 10 degrees of parallel, so a
+    connector with any draft on it was invisible and the fit silently did nothing.
+    Lock and key's 95-degree bar plus measuring each wall where it crosses the axis
+    through the snapped point -- a plane offset is not a width on a tapered wall --
+    is what makes these mate.
+    """
+    clear_scene()
+    peg, peg_seed, socket, socket_seed = make_tapered_pair(8.0)
+    contact = np.array(socket.matrix_world @ socket.data.vertices[socket_seed].co)
+    data = quicksnap_utils._mesh_fit_data(peg)
+    seeds = quicksnap_utils._seed_polygons(data, 'POINTS', peg_seed)
+    openings = [
+        math.degrees(pair['opening_angle'])
+        for pair in quicksnap_utils._plane_pairs(
+            quicksnap_utils._fit_walls(data, seeds), contact)
+        if abs(float(pair['axis'][0])) > 0.99
+    ]
+    if not openings or min(openings) > 170.0:
+        raise AssertionError(
+            f"the fixture is not drafted enough to prove anything: {openings}"
+        )
+    assert_vector_close(
+        run_pair(peg, peg_seed, socket, socket_seed),
+        Vector((0.1, 0.1, 0.0)),
+        tolerance=1e-6,
+    )
+
+
 def assert_fragmented_walls_are_rebuilt():
     """A finely cut, slightly wobbly wall must still read as one wall.
 
@@ -512,6 +574,8 @@ def main():
     print("snug printed clearance: PASS")
     assert_fragmented_walls_are_rebuilt()
     print("fragmented walls are rebuilt: PASS")
+    assert_drafted_connectors_centre()
+    print("drafted connectors centre: PASS")
     assert_vector_close(run_neighboring_socket_case(), Vector((0.1, 0.1, 0.0)), tolerance=1e-7)
     print("neighboring socket: PASS")
     scaled = run_non_uniform_scale_case(apply_scale=False)

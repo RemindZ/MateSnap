@@ -132,7 +132,7 @@ Lock and key's trim floor is deliberately **not** adopted here. It is measured a
 
 Within each mesh, form a pair only when:
 
-- the patch normals are at least 170 degrees apart (`dot <= cos(170 degrees)`);
+- the patch normals are at least 95 degrees apart (amended 2026-08-03: was 170. Draft is not a defect, it is how a part leaves the mould, and demanding the two walls be within 10 degrees of parallel made every drafted connector invisible -- the fit silently did nothing. 95 degrees is Lock and key's bar, and it is the one that separates opposed walls from corners: below it the axis is a corner's bisector and the width it measures is meaningless. Two consequences follow. Each wall is measured where it crosses the axis **through the snapped point** rather than by its plane offset -- identical arithmetic for parallel walls, but on a tapered wall a plane offset is not a width. And source and target tapers must agree within 10 degrees, or a straight wall centres against a chamfered lead-in);
 - both patches pass their flatness test;
 - their plane separation is positive and greater than the combined precision tolerance (amended 2026-08-03: the flatness allowance is 0.5% of a patch's extent, so on a broad thin tab it exceeds the tab's own thickness and discarded the one pair that mattered -- the same mistake, and the same fix, as Lock and key);
 - the snapped point's projection lies inside the closed slab between the planes, plus flatness tolerance;

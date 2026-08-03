@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.8.12
+
+### Fixed
+- **Drafted connectors centre.** Precision fit demanded the two walls be within
+  10 degrees of parallel, so any part with draft on it -- which is every printed
+  part -- was invisible and the fit silently did nothing. The bar is now 95
+  degrees, the one that separates opposed walls from corners. Two things follow:
+  each wall is measured where it crosses the axis *through the snapped point*
+  rather than by its plane offset (identical arithmetic when the walls are
+  parallel, but a plane offset is not a width on a tapered wall), and the two
+  tapers must agree within 10 degrees so a straight wall cannot centre against a
+  chamfered lead-in.
+
 ## 1.8.11
 
 ### Fixed

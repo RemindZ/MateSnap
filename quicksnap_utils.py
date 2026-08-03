@@ -395,11 +395,17 @@ def _candidate_patches(mesh_data, seed_polygons, hops=2):
 
 
 def _plane_pairs(patches, contact):
-    opposed_limit = math.cos(math.radians(170.0))
+    contact = np.array(contact, dtype=np.float64)
     pairs = []
     for i, first in enumerate(patches):
         for second in patches[i + 1:]:
-            if float(first['normal'] @ second['normal']) > opposed_limit:
+            normal_dot = float(first['normal'] @ second['normal'])
+            # Every printed connector carries draft, so demanding the two walls be
+            # within 10 degrees of parallel meant precision fit simply did not see
+            # them. Lock and key's 95-degree bar is the one that separates opposed
+            # walls from corners; below it the axis is a bisector of a corner and
+            # the "width" it measures means nothing.
+            if normal_dot >= _WALL_MAX_OPPOSED_DOT:
                 continue
             axis = first['normal'] - second['normal']
             length = float(np.linalg.norm(axis))
@@ -409,14 +415,26 @@ def _plane_pairs(patches, contact):
             dominant = int(np.argmax(np.abs(axis)))
             if axis[dominant] < 0:
                 axis *= -1.0
-            first_d = float(axis @ first['point'])
-            second_d = float(axis @ second['point'])
-            if first_d <= second_d:
-                low, high = first, second
-                low_d, high_d = first_d, second_d
-            else:
-                low, high = second, first
-                low_d, high_d = second_d, first_d
+            # Measure each wall where it crosses the axis through the snapped
+            # point, not by its plane offset. For parallel walls these are the same
+            # number -- exactly, not approximately -- but on a tapered wall a plane
+            # offset is not a width at all, and the pair it describes is fictional.
+            contact_d = float(axis @ contact)
+            crossings = []
+            for patch in (first, second):
+                denominator = float(patch['normal'] @ axis)
+                if abs(denominator) < 0.5:
+                    crossings = []
+                    break
+                crossings.append(
+                    contact_d
+                    + float(patch['normal'] @ (patch['point'] - contact)) / denominator
+                )
+            if not crossings:
+                continue
+            (low_d, low), (high_d, high) = sorted(
+                zip(crossings, (first, second)), key=lambda item: item[0]
+            )
             tolerance = first['tolerance'] + second['tolerance']
             fit_tolerance = first['fit_tolerance'] + second['fit_tolerance']
             separation = high_d - low_d
@@ -438,6 +456,7 @@ def _plane_pairs(patches, contact):
                 'mid': 0.5 * (low_d + high_d),
                 'center': 0.5 * (low['point'] + high['point']),
                 'separation': separation,
+                'opening_angle': math.acos(np.clip(normal_dot, -1.0, 1.0)),
                 'tolerance': tolerance,
                 'fit_tolerance': fit_tolerance,
             })
@@ -455,6 +474,14 @@ def _match_plane_pairs(source_pairs, target_pairs, contact):
             if float(source['low_patch']['normal'] @ target['low_patch']['normal']) > opposed_limit:
                 continue
             if float(source['high_patch']['normal'] @ target['high_patch']['normal']) > opposed_limit:
+                continue
+            # Now that tapered walls are admitted, the two tapers have to agree --
+            # otherwise a straight wall centres against a chamfered lead-in, which
+            # is the mistake this same test was added to Lock and key to prevent.
+            if (
+                abs(source['opening_angle'] - target['opening_angle'])
+                > _CONNECTOR_TAPER_TOLERANCE
+            ):
                 continue
             tolerance = source['tolerance'] + target['tolerance']
             clearance = target['separation'] - source['separation']
