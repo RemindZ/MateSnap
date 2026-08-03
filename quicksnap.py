@@ -1244,6 +1244,28 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             self.update_header(context)
             return {'RUNNING_MODAL'}
 
+        if (
+            event.type == 'R' and event.value == 'PRESS'
+            and self.current_state == State.SOURCE_PICKED
+        ):
+            # "Turn on Rotate key to match lock" asks the user to abandon the modal,
+            # find a checkbox that is only drawn while Lock and key is enabled, and
+            # start the two picks over. The design wants rotation consented to, not
+            # made expensive; consent is a keystroke, offered where the refusal is.
+            self.settings.lock_and_key_rotate = not getattr(
+                self.settings, "lock_and_key_rotate", False
+            )
+            if (
+                self.settings.lock_and_key_rotate
+                and self.lock_key_target_preview is not None
+                and self.finish_lock_key(context, self.lock_key_target_preview)
+            ):
+                self.terminate(context)
+                return {'FINISHED'}
+            self.update_lock_key_preview(context, region)
+            self.update_header(context)
+            return {'RUNNING_MODAL'}
+
         if event.type == 'MOUSEMOVE':
             self.update_mouse_position(context, event)
             self.update_lock_key_preview(context, region)
@@ -1657,8 +1679,10 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                     "Right Mouse Button/ESC to cancel"
                 )
             else:
+                rotate = getattr(self.settings, "lock_and_key_rotate", False)
                 context.area.header_text_set(
                     "Lock and key: click the matching wall inside the target lock. "
+                    f"R to {'stop rotating' if rotate else 'rotate'} the key to match, "
                     "Backspace to pick the key again, Right Mouse Button/ESC to cancel"
                 )
             return
@@ -2213,6 +2237,13 @@ def load_settings():
         if key in {'rna_type', 'bl_idname'}:
             continue
         try:
+            # Only fill in what this install has never set. The backup is written
+            # on unregister, so a session that ended in a crash leaves it stale --
+            # and restoring it wholesale then quietly undid the user's settings on
+            # the next start, which reads as a setting that will not stay ticked.
+            is_set = getattr(settings, 'is_property_set', None)
+            if callable(is_set) and is_set(key):
+                continue
             setattr(settings, key, value)
         except Exception:
             pass  # property removed or renamed in this version

@@ -1146,10 +1146,12 @@ def assert_lock_key_settings_persist():
             identifier="lock_and_key_rotate", is_readonly=False
         ),
     ]
+    touched = set()
     settings = SimpleNamespace(
         bl_rna=SimpleNamespace(properties=properties),
         lock_and_key_mode=True,
         lock_and_key_rotate=False,
+        is_property_set=lambda identifier: identifier in touched,
     )
     original_get_settings = quicksnap.quicksnap_utils.get_addon_settings
     original_path = quicksnap.settings_file_path
@@ -1160,16 +1162,19 @@ def assert_lock_key_settings_persist():
         try:
             quicksnap.save_settings()
             settings.lock_and_key_mode = False
+            # Set by hand since the backup was written: the backup is only saved on
+            # unregister, so after a crash it is stale, and restoring it wholesale
+            # quietly undid the user's own settings on the next start.
             settings.lock_and_key_rotate = True
+            touched.add("lock_and_key_rotate")
             quicksnap.load_settings()
         finally:
             quicksnap.quicksnap_utils.get_addon_settings = original_get_settings
             quicksnap.settings_file_path = original_path
-    if (
-        settings.lock_and_key_mode is not True
-        or settings.lock_and_key_rotate is not False
-    ):
-        raise AssertionError("Lock and key preferences did not round-trip")
+    if settings.lock_and_key_mode is not True:
+        raise AssertionError("an untouched preference was not restored from backup")
+    if settings.lock_and_key_rotate is not True:
+        raise AssertionError("the backup overwrote a preference the user had set")
 
 
 def assert_either_half_may_move():
@@ -1824,6 +1829,63 @@ def assert_search_widens_for_a_second_axis():
         )
 
 
+def make_cut_face_with_a_peg():
+    """A part cut flat across, with its peg standing on the cut.
+
+    A neck or a shoulder: the click lands on the cut, which has nothing facing it,
+    while the peg beside it is plainly a connector -- and centring puts the anchor
+    between the peg's walls. The stray downward facet at the rim is the modelling
+    junk every real mesh carries; it is what makes the click look, to a test that
+    only measures the clicked wall, like a parting plane.
+    """
+    obj = make_mesh(
+        "CutFace",
+        [
+            (-2.0, -2.0, 0.0), (2.0, -2.0, 0.0), (2.0, 2.0, 0.0), (-2.0, 2.0, 0.0),
+            (-0.6, -0.6, 0.0), (0.6, -0.6, 0.0), (0.6, 0.6, 0.0), (-0.6, 0.6, 0.0),
+            (-0.6, -0.6, 3.0), (0.6, -0.6, 3.0), (0.6, 0.6, 3.0), (-0.6, 0.6, 3.0),
+            (0.6, -0.75, 3.05), (-0.6, -0.75, 3.05),
+        ],
+        [
+            (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7),  # the cut face
+            (4, 5, 9, 8), (5, 6, 10, 9), (6, 7, 11, 10), (7, 4, 8, 11),  # the peg
+            (8, 9, 12, 13),  # a stray lip that faces the cut, and nothing else
+        ],
+    )
+    bpy.context.view_layer.update()
+    return obj, 0
+
+
+def assert_a_connector_in_reach_is_not_called_a_flat_face():
+    """A cut face with its peg on it is not a parting plane.
+
+    Judging the click alone made that verdict unfalsifiable: a click on any flat
+    cut has nothing facing it, so whenever the parts were not already aligned the
+    refusal blamed the click instead of naming the rotation the user needed.
+    """
+    clear_scene()
+    obj, face = make_cut_face_with_a_peg()
+    data = quicksnap_utils._mesh_fit_data(obj)
+    seeds = quicksnap_utils._seed_polygons(data, 'FACES', face)
+    anchor = np.array(
+        quicksnap_utils.clicked_patch_centre(data, face), dtype=np.float64
+    )
+    pairs, reason = quicksnap_utils._connector_pairs(data, seeds, anchor, 'key')
+    if not pairs:
+        raise AssertionError(f"the fixture's peg was not found at all: {reason}")
+    # Teeth: without the pairs, the clicked wall alone still reads as a flat face,
+    # so this fixture does reproduce the reported verdict.
+    if quicksnap_utils._clicked_wall_is_not_a_connector(
+        data, seeds, anchor, 'key', ()
+    ) is None:
+        raise AssertionError("the fixture no longer reproduces the flat-face verdict")
+    verdict = quicksnap_utils._clicked_wall_is_not_a_connector(
+        data, seeds, anchor, 'key', pairs
+    )
+    if verdict is not None:
+        raise AssertionError(f"a peg in reach was called a flat face: {verdict}")
+
+
 def make_chamfered_socket():
     """A socket whose mouth trim spans two directions before its far wall is reached.
 
@@ -2029,6 +2091,8 @@ def main():
     print("search widens for a second axis: PASS")
     assert_parting_plane_click_is_named()
     print("parting plane click is named: PASS")
+    assert_a_connector_in_reach_is_not_called_a_flat_face()
+    print("a peg in reach is not a flat face: PASS")
     assert_trim_does_not_outvote_the_real_walls()
     print("mouth trim does not outvote the real walls: PASS")
     assert_rotation_search_is_bounded()

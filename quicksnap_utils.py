@@ -1620,7 +1620,7 @@ def _pairs_share_an_axis(source_pairs, target_pairs):
 _CONNECTOR_MIN_FACING_FRACTION = 0.02
 
 
-def _clicked_wall_is_not_a_connector(mesh_data, seeds, anchor, label):
+def _clicked_wall_is_not_a_connector(mesh_data, seeds, anchor, label, pairs=()):
     """A refusal for a click on a big flat face rather than on a connector.
 
     This is the commonest way to misread the feature: on a split figurine the two
@@ -1635,6 +1635,20 @@ def _clicked_wall_is_not_a_connector(mesh_data, seeds, anchor, label):
         return None
     area = float(clicked['area'])
     if area <= 0.0:
+        return None
+    # Two substantial walls facing each other near the click are a connector, and
+    # it makes no difference whether the clicked wall is one of them: a neck or a
+    # shoulder is cut flat across, and clicking that cut still reaches the peg
+    # beside it -- centring even puts the anchor between its walls. Only when the
+    # click has nothing facing it AND nothing connector-sized within reach is it
+    # fair to say it landed on bare plate. Judging the click alone made this
+    # verdict unfalsifiable whenever the parts were not already aligned, which is
+    # exactly when the user needs to hear about rotation instead.
+    if any(
+        min(float(pair['low_patch']['area']), float(pair['high_patch']['area']))
+        >= _CONNECTOR_MIN_WALL_FRACTION * area
+        for pair in pairs
+    ):
         return None
     facing = [
         float(wall['area']) for wall in walls
@@ -1729,9 +1743,9 @@ def compute_lock_key_transform(
         # the two connectors line up to a degree sends them at the wrong thing.
         not_a_connector = None if _pairs_share_an_axis(source_pairs, target_pairs) else (
             _clicked_wall_is_not_a_connector(
-                source_data, source_seeds, source_anchor, 'key')
+                source_data, source_seeds, source_anchor, 'key', source_pairs)
             or _clicked_wall_is_not_a_connector(
-                target_data, target_seeds, target_anchor, 'lock')
+                target_data, target_seeds, target_anchor, 'lock', target_pairs)
         )
         if not source_pairs and not_a_connector is None:
             _note_lock_key_skip(diagnostics, source_reason)

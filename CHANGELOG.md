@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.8.10
+
+### Added
+- **R toggles "Rotate key to match lock" during the mate**, and retries the pick
+  straight away. The refusal that asks for rotation was asking the user to leave
+  the modal, find a checkbox that is only drawn while Lock and key is on, and
+  start both picks over. Rotation stays opt-in -- consent is now a keystroke,
+  offered where the refusal happens. The header shows which way it is set.
+
+### Fixed
+- A cut face with its connector beside it is no longer called a parting plane. A
+  neck or a shoulder is cut flat across, so the clicked wall has nothing facing
+  it -- but the peg is right there, and centring even puts the anchor between its
+  walls. Judging the clicked wall alone made that verdict unfalsifiable whenever
+  the parts were not already aligned, which is precisely when the user needed to
+  hear about rotation instead. It now also requires nothing connector-sized
+  within reach.
+- The settings backup no longer overwrites preferences you have set. It is
+  written when the addon is unregistered, so a session that ended in a crash
+  leaves it stale, and it was then restored wholesale on the next start -- which
+  reads as a setting that will not stay ticked. It now fills in only what this
+  install has never set, which is the fresh-install case it exists for.
+
 ## 1.8.9
 
 ### Changed
