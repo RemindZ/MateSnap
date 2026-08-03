@@ -164,6 +164,7 @@ def is_heavy_object(obj, settings=None, depsgraph=None):
 
 
 _FIT_COS_5 = math.cos(math.radians(5.0))
+_FIT_ANGLE_5 = 5.0
 _FIT_ABS_TOL = 1e-7
 
 
@@ -838,6 +839,7 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
     # for the sake of a filter that exists only to keep bevel slivers out.
     searched = (2, 0, False)
     best = []
+    trimmed = []
     for fraction in (_CONNECTOR_MIN_WALL_FRACTION, 0.0):
         for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
             reached, clicked = _connector_walls(mesh_data, seeds, hops)
@@ -882,6 +884,20 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                         " rounded connectors are not supported"
                     )
                 break
+            # The trimmed pass pairs only substantial walls, so whatever it found is
+            # the connector the modeller drew. The fallback re-admits every sliver,
+            # and a chamfer ring around a socket mouth offers pairs on two directions
+            # at once -- enough to look complete and replace a real wall pair with
+            # facets that share no taper with the key. Let it add directions the real
+            # walls left unconstrained; never let it overwrite them.
+            if fraction <= 0.0 and trimmed:
+                pairs = trimmed + [
+                    pair for pair in pairs
+                    if not any(
+                        abs(float(pair['axis'] @ kept['axis'])) >= _FIT_COS_5
+                        for kept in trimmed
+                    )
+                ]
             # Returning at the first radius that yields any pair hands back
             # whichever single wall pair came into view first. Centring wants two
             # independent lateral directions and rotation flatly requires them, so
@@ -901,6 +917,7 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                 break
         if fraction <= 0.0:
             break
+        trimmed = best
     if best:
         return best, None
     advice = (
@@ -1534,6 +1551,13 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
             f" width {pair['width']:.6f}"
             f" opening {math.degrees(pair['opening_angle']):.2f}deg"
             f" anchor_side {pair['anchor_side']}")
+        # Which two walls a pair is made of decides whether it is the connector or a
+        # chamfer facet next to it, and a pair line without them cannot be told
+        # apart from a good one -- which cost a full round of diagnosis.
+        for side in ('low_patch', 'high_patch'):
+            wall = pair[side]
+            say(f"        {side[:-6]:>4} wall area {wall['area']:10.5f}"
+                f" normal {tuple(round(float(v), 4) for v in wall['normal'])}")
     if reason:
         say(f"refused: {reason}")
     return lines
@@ -1545,7 +1569,7 @@ def _closest_orientation_miss(source_pairs, target_pairs):
     "None facing each other" over a thousand combinations says nothing about
     whether the parts are a few degrees out or structurally unrelated, and those
     want opposite advice. Returns (axis degrees apart, worst wall angle from
-    anti-parallel), or None when either side has no pairs.
+    anti-parallel, source pair, target pair), or None when either side has no pairs.
     """
     best = None
     for source in source_pairs:
@@ -1560,8 +1584,17 @@ def _closest_orientation_miss(source_pairs, target_pairs):
                 for side in ('low_patch', 'high_patch')
             )
             if best is None or axis + walls < best[0] + best[1]:
-                best = (axis, walls)
+                best = (axis, walls, source, target)
     return best
+
+
+def _pairs_share_an_axis(source_pairs, target_pairs):
+    """True when the two clicks agree on at least one lateral direction."""
+    return any(
+        abs(float(source['axis'] @ target['axis'])) >= _FIT_COS_5
+        for source in source_pairs
+        for target in target_pairs
+    )
 
 
 # A connector wall faces another wall of comparable size -- that is what makes it a
@@ -1673,17 +1706,19 @@ def compute_lock_key_transform(
             Vector(tuple(float(value) for value in translation))
         )
     if not allow_rotation:
-        not_a_connector = (
+        # Two clicks whose wall pairs agree on a lateral direction have found the
+        # connector, whatever refuses further down: a flat face with nothing facing
+        # it cannot produce one. Telling the user they clicked a parting plane when
+        # the two connectors line up to a degree sends them at the wrong thing.
+        not_a_connector = None if _pairs_share_an_axis(source_pairs, target_pairs) else (
             _clicked_wall_is_not_a_connector(
                 source_data, source_seeds, source_anchor, 'key')
             or _clicked_wall_is_not_a_connector(
                 target_data, target_seeds, target_anchor, 'lock')
         )
-        if not_a_connector is not None:
-            _note_lock_key_skip(diagnostics, not_a_connector)
-        elif not source_pairs:
+        if not source_pairs and not_a_connector is None:
             _note_lock_key_skip(diagnostics, source_reason)
-        elif not target_pairs:
+        elif not target_pairs and not_a_connector is None:
             _note_lock_key_skip(diagnostics, target_reason)
         # Both clicks produced pairs, so nothing here is merely out of reach --
         # which makes it worth asking whether either click was on a connector at
@@ -1697,8 +1732,23 @@ def compute_lock_key_transform(
             # into place can never match however well the parts actually fit.
             # Distinguish that from parts that face each other but do not fit.
             facing = _orientation_compatible_pairs(source_pairs, target_pairs)
-            if not facing:
-                miss = _closest_orientation_miss(source_pairs, target_pairs)
+            miss = _closest_orientation_miss(source_pairs, target_pairs)
+            if not facing and miss is not None and miss[0] <= _FIT_ANGLE_5:
+                # The axes agree, so the parts are not turned the wrong way and no
+                # amount of rotating will help. What differs is the shape of the two
+                # walls themselves -- typically a straight peg measured against the
+                # chamfered mouth of its socket, whose facets are the only pair the
+                # search reached.
+                _note_lock_key_skip(
+                    diagnostics,
+                    "the key and the lock line up on the same axis but their walls"
+                    " are not parallel -- the key's walls open"
+                    f" {math.degrees(miss[2]['opening_angle']):.1f} degrees where the"
+                    f" lock's open {math.degrees(miss[3]['opening_angle']):.1f}, so"
+                    " one of the two is a chamfer or a taper rather than the"
+                    " straight wall of the connector. Click further along the wall,"
+                    " past any chamfer at its mouth")
+            elif not facing:
                 nearest = "" if miss is None else (
                     f"; nearest combination is {miss[0]:.1f} degrees off on the"
                     f" wall direction and {miss[1]:.1f} degrees from facing"

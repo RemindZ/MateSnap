@@ -1824,6 +1824,72 @@ def assert_search_widens_for_a_second_axis():
         )
 
 
+def make_chamfered_socket():
+    """A socket whose mouth trim spans two directions before its far wall is reached.
+
+    The shape from the reported log: the two real walls are four patch hops apart
+    (across the lips and the rim between them), while the chamfer at the mouth and
+    the lead-ins at the ends are one hop from the click and already opposed on two
+    axes of their own. Their walls open around 120 degrees where the real ones open
+    180, so a key measured against them can never match.
+    """
+    obj = make_mesh(
+        "ChamferedSocket",
+        [
+            (-5.0, -1.0, -4.0), (5.0, -1.0, -4.0), (5.0, -1.0, 0.0), (-5.0, -1.0, 0.0),
+            (-5.0, 1.0, -4.0), (5.0, 1.0, -4.0), (5.0, 1.0, 0.0), (-5.0, 1.0, 0.0),
+            (-5.0, -1.15, 0.1), (5.0, -1.15, 0.1),
+            (-5.0, 1.15, 0.1), (5.0, 1.15, 0.1),
+            (-5.0, -1.12, -4.09), (5.0, -1.12, -4.09),
+            (-5.2, -0.6, -4.0), (-5.2, -0.6, 0.0),
+            (5.2, -0.6, -4.0), (5.2, -0.6, 0.0),
+        ],
+        [
+            (3, 2, 1, 0),      # the clicked wall
+            (4, 5, 6, 7),      # its opposite, four hops away
+            (8, 9, 2, 3),      # chamfer at the mouth
+            (7, 6, 11, 10),
+            (0, 1, 13, 12),    # lip at the far end
+            (8, 9, 11, 10),    # rim across the mouth
+            (14, 15, 3, 0),    # lead-in at each end of the clicked wall
+            (1, 2, 17, 16),
+        ],
+    )
+    bpy.context.view_layer.update()
+    return obj, 0, Vector((0.0, -1.0, -2.0))
+
+
+def assert_trim_does_not_outvote_the_real_walls():
+    """The sliver fallback may add a direction; it may not replace the walls.
+
+    The trimmed pass pairs only substantial walls, so what it finds is the connector
+    the modeller drew. The fallback re-admits every sliver, and a chamfer ring is
+    opposed on two axes at once a hop from the click -- enough to look complete and
+    return before the search ever reaches the far wall.
+    """
+    clear_scene()
+    socket, face, hit = make_chamfered_socket()
+    data = quicksnap_utils._mesh_fit_data(socket)
+    seeds = quicksnap_utils._seed_polygons(data, 'FACES', face)
+    pairs, reason = quicksnap_utils._connector_pairs(
+        data, seeds, np.array(hit, dtype=np.float64), 'lock'
+    )
+    real = [
+        pair for pair in pairs
+        if min(float(pair['low_patch']['area']), float(pair['high_patch']['area']))
+        >= 10.0
+    ]
+    if not real:
+        openings = [
+            round(math.degrees(pair['opening_angle']), 1) for pair in pairs
+        ]
+        raise AssertionError(
+            "the mouth trim replaced the connector walls:"
+            f" {len(pairs)} pair(s) opening {openings}, none between real walls"
+            f" ({reason})"
+        )
+
+
 def assert_parting_plane_click_is_named():
     """Clicking the flat face two halves meet on must say so.
 
@@ -1955,6 +2021,8 @@ def main():
     print("search widens for a second axis: PASS")
     assert_parting_plane_click_is_named()
     print("parting plane click is named: PASS")
+    assert_trim_does_not_outvote_the_real_walls()
+    print("mouth trim does not outvote the real walls: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

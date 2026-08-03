@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.8
+
+### Fixed
+- The chamfer around a socket mouth no longer replaces the socket's own walls. Both
+  search passes restart close to the click, and the trim there is opposed on two
+  directions of its own -- enough to look like a complete picture and be returned
+  before the search ever reached the far wall. The matcher was then handed walls
+  opening 110 degrees against a key opening 180 and refused the mate. The trimmed
+  pass now keeps what it found; the fallback may only add a direction it lacked.
+- A click is no longer called a parting plane when both clicks did find a connector.
+  Wall pairs from the two clicks that agree on a direction are the connector, and
+  telling the user to click somewhere else sent them at the wrong thing entirely.
+
+### Added
+- A refusal for walls that line up but are not parallel: "the key's walls open 174
+  degrees where the lock's open 127". That is a chamfer measured against a straight
+  wall, and no amount of rotating fixes it, which is what the old message advised.
+- The diagnostic report names the two walls behind every pair it lists. Without
+  them a chamfer facet and a connector wall read identically on the page, which
+  cost a full round of diagnosis.
+
 ## 1.8.7
 
 ### Added
