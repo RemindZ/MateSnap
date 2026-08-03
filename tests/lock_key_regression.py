@@ -1974,6 +1974,14 @@ def main():
     assert compute_case(
         lambda: make_key_lock(taper_degrees=15.0, target_taper_degrees=5.0)
     ) is None
+    # ...but a few degrees is measurement rather than shape. Each wall carries its
+    # own error, and matching already allows every one of them 10 degrees from
+    # anti-parallel, so demanding their difference agree within 5 refused real
+    # connectors -- and refused them twice over on the rotation path, which needs
+    # two matched pairs and so fails entirely when one drops out.
+    assert compute_case(
+        lambda: make_key_lock(taper_degrees=15.0, target_taper_degrees=12.0)
+    ) is not None
     # A key wider than its lock cannot be seated. (Equal widths are a snug fit and
     # do mate -- see assert_realistic_clearance_mates.)
     assert compute_case(

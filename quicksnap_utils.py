@@ -1038,9 +1038,21 @@ def _pair_clearance(source, target):
     return target['width'] - source['width']
 
 
+# How closely the key's taper must match the lock's. Matching already allows each
+# wall 10 degrees from anti-parallel, and an opening is the difference of two such
+# measurements, so requiring the openings themselves to agree within 5 was stricter
+# than the test it accompanies. On a small connector, whose walls are a handful of
+# merged fragments each, half a dozen degrees of disagreement is measurement rather
+# than shape, and it refused connectors that plainly mate -- including on the
+# rotation path, which needs two matched pairs and so fails entirely on one. It
+# still fails closed on what this test exists for: a chamfered lead-in reads 40 to
+# 60 degrees away from the straight wall it sits on.
+_CONNECTOR_TAPER_TOLERANCE = math.radians(10.0)
+
+
 def _match_connector_pairs(source_pairs, target_pairs):
     """Match compatible male/female wall pairs without guessing through ambiguity."""
-    angle_tolerance = math.radians(5.0)
+    angle_tolerance = _CONNECTOR_TAPER_TOLERANCE
     opposed_limit = math.cos(math.radians(170.0))
     matches = []
     for source in source_pairs:
@@ -1140,7 +1152,8 @@ def _rotation_compatible(source, target):
     clearance = _pair_clearance(source, target)
     return (
         clearance is not None
-        and abs(source['opening_angle'] - target['opening_angle']) <= math.radians(5.0)
+        and abs(source['opening_angle'] - target['opening_angle'])
+        <= _CONNECTOR_TAPER_TOLERANCE
         and clearance >= -(source['fit_tolerance'] + target['fit_tolerance'])
     )
 
@@ -1249,7 +1262,7 @@ def _rotation_candidates(
                 clearance = _pair_clearance(source, target)
                 if (
                     abs(source['opening_angle'] - target['opening_angle'])
-                    > math.radians(5.0)
+                    > _CONNECTOR_TAPER_TOLERANCE
                     or clearance is None
                     or clearance < -tolerance
                     or (
@@ -1547,9 +1560,13 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
     pairs, reason = _connector_pairs(mesh_data, seeds, anchor, label.lower())
     say(f"opposed wall pairs: {len(pairs)}")
     for pair in pairs[:6]:
+        # Which side is the socket is read off the wall normals, not off click
+        # order, and it decides which way the clearance is subtracted -- so a
+        # width mismatch cannot be read at all without it.
         say(f"    axis {tuple(round(float(v), 4) for v in pair['axis'])}"
             f" width {pair['width']:.6f}"
             f" opening {math.degrees(pair['opening_angle']):.2f}deg"
+            f" {'socket' if _pair_is_female(pair) else 'peg'}"
             f" anchor_side {pair['anchor_side']}")
         # Which two walls a pair is made of decides whether it is the connector or a
         # chamfer facet next to it, and a pair line without them cannot be told

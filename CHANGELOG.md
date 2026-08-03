@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.9
+
+### Changed
+- The key's taper may now differ from the lock's by 10 degrees rather than 5.
+  Matching already allows each wall 10 degrees from anti-parallel, and an opening
+  is the difference of two such measurements, so the old figure was stricter than
+  the test it accompanied. On a small connector -- a hair peg reading 141.8 degrees
+  against a head socket's 147.3 -- that is measurement, not shape, and it refused
+  the mate. Worse on the rotation path, which needs two matched pairs and so failed
+  outright when one dropped out. A chamfer still reads 40 to 60 degrees away and is
+  still refused.
+
+### Added
+- The diagnostic report says whether each wall pair is a peg or a socket. Which
+  side is which is read off the wall normals, and a width mismatch cannot be read
+  at all without it.
+
 ## 1.8.8
 
 ### Fixed
