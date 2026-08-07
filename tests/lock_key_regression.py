@@ -184,7 +184,9 @@ def assert_matrix_finite(matrix):
 
 LOCK_KEY_OPERATOR_METHODS = (
     "lock_key_fit_object",
+    "lock_key_provider",
     "lock_key_mesh_data",
+    "solve_lock_key",
     "lock_key_neighborhood",
     "lock_key_geometry_signature",
     "reset_lock_key_source",
@@ -567,19 +569,27 @@ def assert_insertion_direction_is_constrained():
 
 
 def assert_source_mesh_extracted_once():
-    """Extraction dominates the cost on dense meshes: one per object per mate."""
+    """Extraction is paid per object, never per solver consumer.
+
+    The original regression paid the full extraction three times per mate --
+    once per click plus once for the solver -- scaling with mesh size. A region
+    provider may legitimately rebuild along its bounded widen chain (the
+    fixture is smaller than any initial region, so it walks the whole chain),
+    but the count is set by that chain, not by how many callers consume the
+    data, and its bulk reads are cache-validated rather than re-extracted.
+    """
     clear_scene()
     key, key_face, key_hit, lock, lock_face, lock_hit = make_straight_key_lock()
     operator = make_lock_key_operator([key.name], ignore_modifiers=True)
     counts = {}
     module = quicksnap.quicksnap_utils
-    original = module._mesh_fit_data
+    original = module._lock_key_fit_data
 
-    def counting(obj):
+    def counting(obj, *args, **kwargs):
         counts[obj.name] = counts.get(obj.name, 0) + 1
-        return original(obj)
+        return original(obj, *args, **kwargs)
 
-    module._mesh_fit_data = counting
+    module._lock_key_fit_data = counting
     try:
         operator.record_lock_key_source(
             {
@@ -595,13 +605,15 @@ def assert_source_mesh_extracted_once():
             'location': lock_hit,
         })
     finally:
-        module._mesh_fit_data = original
+        module._lock_key_fit_data = original
     if not result:
         raise AssertionError("mate failed with the extraction cache enabled")
-    if counts.get(key.name) != 1 or counts.get(lock.name) != 1:
-        raise AssertionError(
-            f"expected one extraction per object per mate, got {counts}"
-        )
+    # The widen chain is 0.05 -> 0.1 -> 0.2 -> 0.4 -> full: at most 5 builds.
+    for name in (key.name, lock.name):
+        if not 1 <= counts.get(name, 0) <= 5:
+            raise AssertionError(
+                f"expected a bounded handful of builds per object, got {counts}"
+            )
 
 
 def assert_moving_hierarchy_is_handled():
@@ -2062,6 +2074,131 @@ def assert_chamfer_click_names_its_wall():
         )
 
 
+def make_regioned_pair():
+    """A long socket under a dense bumpy plate, and the peg that fits it.
+
+    The socket's clicked wall spans further than the initial region radius, so
+    the first extraction must raise and widen exactly once -- and the plate
+    (disconnected, fragmented by its bumps the way an organic surround is)
+    makes the mesh large enough that the settled region stays partial.
+    """
+    import math as _math
+    cells = 120
+    half = 50.0
+    step = 2.0 * half / cells
+    verts = [
+        (
+            -half + column * step,
+            -half + row * step,
+            0.3 * _math.sin((-half + column * step) * 0.6)
+            * _math.sin((-half + row * step) * 0.6),
+        )
+        for row in range(cells + 1)
+        for column in range(cells + 1)
+    ]
+    faces = [
+        (
+            row * (cells + 1) + column,
+            row * (cells + 1) + column + 1,
+            (row + 1) * (cells + 1) + column + 1,
+            (row + 1) * (cells + 1) + column,
+        )
+        for row in range(cells)
+        for column in range(cells)
+    ]
+    base = len(verts)
+    # The socket island floats beneath the plate, disconnected: a tub of four
+    # walls and a floor, 20 long by 3 wide, walls facing inward.
+    verts += [
+        (-10.0, -1.5, -1.0), (10.0, -1.5, -1.0),
+        (10.0, 1.5, -1.0), (-10.0, 1.5, -1.0),
+        (-10.0, -1.5, -3.0), (10.0, -1.5, -3.0),
+        (10.0, 1.5, -3.0), (-10.0, 1.5, -3.0),
+    ]
+    socket_faces = [
+        (0, 1, 5, 4),      # low-y wall (clicked)
+        (2, 3, 7, 6),      # high-y wall
+        (1, 2, 6, 5),      # high-x end
+        (3, 0, 4, 7),      # low-x end
+        (4, 5, 6, 7),      # floor
+    ]
+    lock_wall_face = len(faces)
+    faces += [tuple(base + index for index in quad) for quad in socket_faces]
+    lock = make_mesh("Lock", verts, faces)
+
+    key = make_mesh(
+        "Key",
+        [
+            (-9.0, -1.2, 0.0), (9.0, -1.2, 0.0),
+            (9.0, 1.2, 0.0), (-9.0, 1.2, 0.0),
+            (-9.0, -1.2, 2.0), (9.0, -1.2, 2.0),
+            (9.0, 1.2, 2.0), (-9.0, 1.2, 2.0),
+        ],
+        [
+            (3, 2, 1, 0), (4, 5, 6, 7),
+            (0, 1, 5, 4),      # low-y wall (clicked)
+            (2, 3, 7, 6),
+            (1, 2, 6, 5), (3, 0, 4, 7),
+        ],
+    )
+    key.location = (30.0, 40.0, 10.0)
+    bpy.context.view_layer.update()
+    key_hit = key.matrix_world @ Vector((0.0, -1.2, 1.0))
+    lock_hit = lock.matrix_world @ Vector((0.0, -1.5, -2.0))
+    return key, 2, key_hit, lock, lock_wall_face, lock_hit
+
+
+def assert_region_extraction_matches_full():
+    """A dense part mates from a click-local region, and identically.
+
+    Region extraction must be behaviour-invisible: any patch touching the
+    sphere's rim widens it, so every measurement the solver reads comes from
+    whole patches. The fixture's clicked wall overruns the first radius, so
+    this exercises the raise-and-widen path, the settled partial region, and
+    delta equality against full coverage in one pass.
+    """
+    clear_scene()
+    key, key_face, key_hit, lock, lock_face, lock_hit = make_regioned_pair()
+    settings = SimpleNamespace(ignore_modifiers=True)
+    full = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, settings,
+        "Key", key_face, key_hit, "Lock", lock_face, lock_hit,
+    )
+    if full is None:
+        raise AssertionError("the full-coverage control failed to mate")
+
+    key_provider = quicksnap_utils.LockKeyMeshProvider(key_hit)
+    lock_provider = quicksnap_utils.LockKeyMeshProvider(lock_hit)
+    while True:
+        try:
+            delta = quicksnap_utils.compute_lock_key_transform(
+                bpy.context, settings,
+                "Key", key_face, key_hit, "Lock", lock_face, lock_hit,
+                source_mesh_data=key_provider.data(bpy.data.objects["Key"]),
+                target_mesh_data=lock_provider.data(bpy.data.objects["Lock"]),
+            )
+            break
+        except quicksnap_utils.LockKeyRegionTooSmall as region:
+            if not region.provider.widen():
+                raise AssertionError(
+                    "full coverage raised the widen signal"
+                )
+    if delta is None:
+        raise AssertionError("the region path refused a mate full coverage found")
+    if lock_provider.full:
+        raise AssertionError("the lock region ballooned to full coverage")
+    if lock_provider.fraction <= quicksnap_utils._REGION_INITIAL_FRACTION:
+        raise AssertionError("the widen path was never exercised")
+    difference = max(
+        abs(delta[row][column] - full[row][column])
+        for row in range(4) for column in range(4)
+    )
+    if difference > 1e-5:
+        raise AssertionError(
+            f"region mate differs from full coverage by {difference}"
+        )
+
+
 def assert_parting_plane_click_is_named():
     """Clicking the flat face two halves meet on must say so.
 
@@ -2207,6 +2344,8 @@ def main():
     print("mouth trim does not outvote the real walls: PASS")
     assert_chamfer_click_names_its_wall()
     print("chamfer click names its wall: PASS")
+    assert_region_extraction_matches_full()
+    print("region extraction matches full coverage: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

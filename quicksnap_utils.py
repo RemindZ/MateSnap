@@ -291,8 +291,248 @@ def _mesh_fit_data(obj):
     return world
 
 
+class LockKeyRegionTooSmall(Exception):
+    """A patch or search reached the edge of a region extraction.
+
+    Every measurement the solver reads -- areas, extents, centroids, reach --
+    must come from whole patches, so the moment anything touches the region rim
+    the region is too small to answer honestly. Carries the provider so the
+    caller can widen and retry.
+    """
+
+    def __init__(self, provider):
+        super().__init__("lock-key region too small")
+        self.provider = provider
+
+
+def _lock_key_bulk(obj):
+    """The bulk reads a lock-key extraction needs, cached and revalidated.
+
+    Everything here is position-independent, so it survives the object moving.
+    Lock and key never seeds from edges, so Blender's edge tables -- the single
+    most expensive reads -- are not fetched at all; edge connectivity is
+    derived from the corner table when a region is built.
+    """
+    mesh = obj.data
+    key = ('lock-key', obj.name, bool(getattr(obj, 'is_evaluated', False)))
+    counts = (
+        len(mesh.vertices), len(mesh.edges), len(mesh.polygons), len(mesh.loops)
+    )
+    vertex_count, _edge_count, polygon_count, loop_count = counts
+
+    vertices = np.empty(vertex_count * 3, dtype=np.float64)
+    mesh.vertices.foreach_get('co', vertices)
+    vertices.shape = (vertex_count, 3)
+    loop_vertices = np.empty(loop_count, dtype=np.int32)
+    mesh.loops.foreach_get('vertex_index', loop_vertices)
+
+    cached = _EXTRACTION_CACHE.get(key)
+    if (
+        cached is not None
+        and cached['counts'] == counts
+        and np.array_equal(cached['vertices'], vertices)
+        and np.array_equal(cached['loop_vertices'], loop_vertices)
+    ):
+        _EXTRACTION_CACHE.pop(key)
+        _EXTRACTION_CACHE[key] = cached
+        return cached
+
+    loop_starts = np.empty(polygon_count, dtype=np.int32)
+    loop_totals = np.empty(polygon_count, dtype=np.int32)
+    mesh.polygons.foreach_get('loop_start', loop_starts)
+    mesh.polygons.foreach_get('loop_total', loop_totals)
+    extent_low = vertices.min(axis=0) if vertex_count else np.zeros(3)
+    extent_high = vertices.max(axis=0) if vertex_count else np.zeros(3)
+    bulk = {
+        'counts': counts,
+        'vertices': vertices,
+        'loop_vertices': loop_vertices,
+        'loop_starts': loop_starts,
+        'loop_totals': loop_totals,
+        'loop_polygons': np.repeat(
+            np.arange(polygon_count, dtype=np.int32), loop_totals
+        ),
+        'bbox_diagonal': float(np.linalg.norm(extent_high - extent_low)),
+    }
+    _EXTRACTION_CACHE.pop(key, None)
+    _EXTRACTION_CACHE[key] = bulk
+    while len(_EXTRACTION_CACHE) > _EXTRACTION_CACHE_LIMIT:
+        _EXTRACTION_CACHE.pop(next(iter(_EXTRACTION_CACHE)))
+    return bulk
+
+
+def _lock_key_fit_data(obj, bulk=None, centre_local=None, radius_local=None,
+                       provider=None):
+    """Lock-key mesh data, whole-mesh or restricted to a sphere about a click.
+
+    Same dict shape as _mesh_fit_data with polygon indexing left global, but
+    edges are synthesised from the corner table (their ids are private to this
+    dict) and centers and normals are computed from coordinates -- for a region,
+    only for the polygons it holds. Polygons with any vertex outside the sphere
+    are included and marked in 'region_boundary'; growth raises
+    LockKeyRegionTooSmall the moment it touches one.
+    """
+    if bulk is None:
+        bulk = _lock_key_bulk(obj)
+    loop_vertices = bulk['loop_vertices']
+    loop_starts = bulk['loop_starts']
+    loop_totals = bulk['loop_totals']
+    polygon_count = len(loop_starts)
+
+    matrix = np.array(obj.matrix_world, dtype=np.float64)
+    vertices = bulk['vertices'] @ matrix[:3, :3].T + matrix[:3, 3]
+
+    boundary = None
+    if centre_local is not None and radius_local is not None:
+        delta = bulk['vertices'] - np.asarray(centre_local, dtype=np.float64)
+        vert_in = np.einsum('ij,ij->i', delta, delta) <= radius_local * radius_local
+        loop_in = vert_in[loop_vertices].astype(np.int32)
+        inside_counts = np.add.reduceat(
+            loop_in, loop_starts.astype(np.int64)
+        ) if polygon_count else np.zeros(0, dtype=np.int32)
+        poly_any = inside_counts > 0
+        subset = np.nonzero(poly_any)[0].astype(np.int32)
+        if not len(subset):
+            subset = np.zeros(0, dtype=np.int32)
+        member = poly_any
+        boundary = poly_any & (inside_counts < loop_totals)
+    else:
+        member = None
+        subset = np.arange(polygon_count, dtype=np.int32)
+
+    sub_counts = loop_totals[subset]
+    slots = _csr_ranges(loop_starts[subset], sub_counts)
+    sub_starts = np.cumsum(sub_counts) - sub_counts
+    corner = loop_vertices[slots]
+    successor = np.arange(len(slots), dtype=np.int64) + 1
+    ends = sub_starts + sub_counts - 1
+    successor[ends] = sub_starts
+    corner_next = corner[successor]
+    positions = vertices[corner]
+
+    # Centers as the corner mean and normals by Newell's formula, both from
+    # world coordinates: within float noise of Blender's own values, and they
+    # never require reading 5.5M polygons the click will not look at.
+    centers = np.zeros((polygon_count, 3), dtype=np.float64)
+    normals = np.zeros((polygon_count, 3), dtype=np.float64)
+    if len(subset):
+        reduce_at = sub_starts.astype(np.int64)
+        sums = np.add.reduceat(positions, reduce_at, axis=0)
+        centers[subset] = sums / sub_counts[:, None]
+        crosses = np.cross(positions, vertices[corner_next])
+        newell = np.add.reduceat(crosses, reduce_at, axis=0)
+        lengths = np.linalg.norm(newell, axis=1)
+        lengths[lengths == 0] = 1.0
+        normals[subset] = newell / lengths[:, None]
+
+    low = np.minimum(corner, corner_next).astype(np.int64)
+    high = np.maximum(corner, corner_next).astype(np.int64)
+    keys = (low << 32) | high
+    unique_keys, inverse = np.unique(keys, return_inverse=True)
+    loop_edges = np.full(len(loop_vertices), -1, dtype=np.int32)
+    loop_edges[slots] = inverse.astype(np.int32)
+    edge_lengths = np.linalg.norm(
+        vertices[(unique_keys >> 32)] - vertices[(unique_keys & 0xFFFFFFFF)],
+        axis=1,
+    )
+    order = np.argsort(inverse, kind='stable')
+    edge_polygons = bulk['loop_polygons'][slots][order]
+    edge_counts = np.bincount(inverse, minlength=len(unique_keys))
+    edge_starts = np.concatenate(([0], np.cumsum(edge_counts)))
+
+    return {
+        'vertices': vertices,
+        'loop_vertices': loop_vertices,
+        'loop_edges': loop_edges,
+        'loop_starts': loop_starts,
+        'loop_totals': loop_totals,
+        'loop_polygons': bulk['loop_polygons'],
+        'polygon_centers': centers,
+        'polygon_normals': normals,
+        'edge_lengths': edge_lengths,
+        'edge_polygons': edge_polygons,
+        'edge_starts': edge_starts,
+        'polygon_geometry': {},
+        'polygon_patches': {},
+        'synthetic_edges': True,
+        'region_member': member,
+        'region_boundary': boundary,
+        'region_provider': provider,
+    }
+
+
+# A region starts at this fraction of the part's bounding diagonal and doubles
+# on each widen; past the ceiling the whole part is cheaper than another
+# partial build, so it falls through to full coverage.
+_REGION_INITIAL_FRACTION = 0.05
+_REGION_MAX_FRACTION = 0.3
+
+
+class LockKeyMeshProvider:
+    """Serves one object's lock-key mesh data, region-first.
+
+    The solver raises LockKeyRegionTooSmall through whatever call consumed the
+    data; the caller widens this provider and retries. Once full coverage is
+    reached nothing can raise, so every retry loop terminates.
+    """
+
+    def __init__(self, world_hit=None):
+        self.world_hit = None if world_hit is None else np.array(
+            world_hit, dtype=np.float64
+        )
+        self.fraction = _REGION_INITIAL_FRACTION
+        self.full = self.world_hit is None
+        self._built = None
+        self._built_key = None
+
+    def data(self, fit_obj):
+        matrix = np.array(fit_obj.matrix_world, dtype=np.float64)
+        key = (matrix.tobytes(), self.full, self.fraction)
+        if self._built is not None and self._built_key == key:
+            return self._built
+        # Bulk fetch (and its revalidation reads) only on an actual rebuild.
+        bulk = _lock_key_bulk(fit_obj)
+        if self.full:
+            built = _lock_key_fit_data(fit_obj, bulk, provider=self)
+        else:
+            inverse = np.array(fit_obj.matrix_world.inverted(), dtype=np.float64)
+            centre_local = (
+                inverse[:3, :3] @ self.world_hit + inverse[:3, 3]
+            )
+            built = _lock_key_fit_data(
+                fit_obj, bulk,
+                centre_local=centre_local,
+                radius_local=self.fraction * bulk['bbox_diagonal'],
+                provider=self,
+            )
+        self._built = built
+        self._built_key = key
+        return built
+
+    def widen(self):
+        if self.full:
+            return False
+        self.fraction *= 2.0
+        if self.fraction > _REGION_MAX_FRACTION:
+            self.full = True
+        self._built = None
+        self._built_key = None
+        return True
+
+    def force_full(self):
+        """Full coverage immediately -- for paths that must never raise."""
+        if not self.full:
+            self.full = True
+            self._built = None
+            self._built_key = None
+
+
 def _seed_polygons(mesh_data, snap_type, element_index):
     if element_index < 0:
+        return []
+    # Synthetic edge ids are private to lock-key data; a Blender edge index
+    # means nothing against them.
+    if snap_type == 'MIDPOINTS' and mesh_data.get('synthetic_edges'):
         return []
     if snap_type == 'POINTS' and element_index < len(mesh_data['vertices']):
         mask = mesh_data['loop_vertices'] == element_index
@@ -370,6 +610,11 @@ def _polygon_areas(mesh_data, polygon_indices):
 def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
     if seed_polygon in mesh_data['polygon_patches']:
         return mesh_data['polygon_patches'][seed_polygon]
+    # A seed the region does not even hold has no connectivity here at all --
+    # not boundary-marked, just absent -- so it must widen, not grow garbage.
+    region_member = mesh_data.get('region_member')
+    if region_member is not None and not region_member[int(seed_polygon)]:
+        raise LockKeyRegionTooSmall(mesh_data['region_provider'])
 
     normals = mesh_data['polygon_normals']
     centers = mesh_data['polygon_centers']
@@ -414,6 +659,11 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
         in_component[frontier] = True
 
     polygon_indices = np.nonzero(in_component)[0].astype(np.int32)
+    # Region extraction: a patch touching a polygon the sphere cut open would
+    # report truncated measurements, and everything downstream reads them.
+    region_boundary = mesh_data.get('region_boundary')
+    if region_boundary is not None and region_boundary[polygon_indices].any():
+        raise LockKeyRegionTooSmall(mesh_data['region_provider'])
     component = {int(index) for index in polygon_indices}
     areas = _polygon_areas(mesh_data, polygon_indices)
     total_area = float(areas.sum())
@@ -852,6 +1102,8 @@ def clicked_patch_centre(mesh_data, face_index):
         return None
     try:
         patch = _grow_planar_patch(mesh_data, index)
+    except LockKeyRegionTooSmall:
+        raise
     except Exception:
         return None
     if patch is None:
@@ -888,6 +1140,8 @@ def trim_click_promotions(mesh_data, face_index):
         return []
     try:
         clicked = _grow_planar_patch(mesh_data, index)
+    except LockKeyRegionTooSmall:
+        raise
     except Exception:
         return []
     if clicked is None:
@@ -1958,10 +2212,12 @@ def compute_lock_key_transform(
     source_fit = source_obj if ignore_modifiers else source_obj.evaluated_get(depsgraph)
     target_fit = target_obj if ignore_modifiers else target_obj.evaluated_get(depsgraph)
     source_data = (
-        _mesh_fit_data(source_fit) if source_mesh_data is None else source_mesh_data
+        _lock_key_fit_data(source_fit) if source_mesh_data is None
+        else source_mesh_data
     )
     target_data = (
-        _mesh_fit_data(target_fit) if target_mesh_data is None else target_mesh_data
+        _lock_key_fit_data(target_fit) if target_mesh_data is None
+        else target_mesh_data
     )
     source_seeds = _seed_polygons(source_data, 'FACES', source_face_index)
     target_seeds = _seed_polygons(target_data, 'FACES', target_face_index)

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.16
+
+### Fixed
+- **The cold click extracts a region around the cursor, not the whole part.**
+  Lock and key now reads a sphere around the click -- starting at 5% of the
+  part's size and widening whenever any patch it needs got cut open by the
+  sphere, so every measurement still comes from whole patches and the mate is
+  identical to full coverage (regression-tested for delta equality). Lock-key
+  extraction also stops reading Blender's edge tables entirely, deriving edge
+  connectivity from the corner table instead; that alone trims the fallback
+  that still covers clicks on large flat faces, which by design widen to the
+  whole part. Measured at 1.8M triangles: 1.75s cold before, 1.10s after --
+  the remaining cost is Blender's bulk coordinate and corner reads themselves.
+
 ## 1.8.15
 
 ### Fixed

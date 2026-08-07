@@ -548,32 +548,41 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return obj
         return obj.evaluated_get(context.evaluated_depsgraph_get())
 
-    def lock_key_mesh_data(self, context, object_name):
-        """Extract a connector mesh once per object per mate.
+    def lock_key_provider(self, context, object_name, world_hit=None):
+        """The per-object mesh provider for this run, created on first use.
 
-        Extraction is the dominant cost on dense meshes, and the two clicks plus the
-        solver used to pay it three times over. This cache is for solving only --
-        never for deciding whether the geometry is still valid.
+        The first caller to name an object decides its region anchor: a click
+        hands its world hit so extraction can stay local to it, and paths
+        without one get full coverage. This cache is for solving only -- never
+        for deciding whether the geometry is still valid.
         """
-        cached = self._lock_key_mesh_cache.get(object_name)
-        if cached is not None:
-            return cached
+        provider = self._lock_key_mesh_cache.get(object_name)
+        if provider is None:
+            provider = quicksnap_utils.LockKeyMeshProvider(world_hit)
+            self._lock_key_mesh_cache[object_name] = provider
+        return provider
+
+    def lock_key_mesh_data(self, context, object_name, world_hit=None):
+        """Lock-key mesh data for one object, region-first around its click."""
+        provider = self.lock_key_provider(context, object_name, world_hit)
         fit_obj = self.lock_key_fit_object(context, object_name)
         if fit_obj is None:
             return None
         started = time.perf_counter()
         try:
-            mesh_data = quicksnap_utils._mesh_fit_data(fit_obj)
+            mesh_data = provider.data(fit_obj)
+        except quicksnap_utils.LockKeyRegionTooSmall:
+            raise
         except Exception:
             return None
         elapsed = time.perf_counter() - started
         if elapsed > 0.25:
             # A slow pick must name its stage in the console: users' models are
             # proprietary, so the log is the only place a stall can be diagnosed.
+            coverage = "full" if provider.full else f"{provider.fraction:.0%} region"
             logger.warning(
                 f"Lock and key: extracting {object_name} took {elapsed:.2f}s"
-                f" ({len(mesh_data['loop_starts'])} polygons)")
-        self._lock_key_mesh_cache[object_name] = mesh_data
+                f" ({coverage} of {len(mesh_data['loop_starts'])} polygons)")
         return mesh_data
 
     def lock_key_neighborhood(self, context, object_name, face_index):
@@ -595,6 +604,8 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 mesh_data, 'FACES', face_index
             )
             patches = quicksnap_utils._candidate_patches(mesh_data, seeds)
+        except quicksnap_utils.LockKeyRegionTooSmall:
+            raise
         except Exception:
             return None
         if not patches:
@@ -914,7 +925,9 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return hit
         started = time.perf_counter()
         centre = quicksnap_utils.clicked_patch_centre(
-            self.lock_key_mesh_data(context, hit['object_name']),
+            self.lock_key_mesh_data(
+                context, hit['object_name'], hit.get('location')
+            ),
             hit['face_index'],
         )
         elapsed = time.perf_counter() - started
@@ -930,12 +943,21 @@ class QuickVertexSnapOperator(bpy.types.Operator):
 
     def record_lock_key_source(self, hit, context=None):
         started = time.perf_counter()
-        centred = self.lock_key_centre_hit(context, hit)
-        signature = hit.get('geometry_signature')
-        if signature is None and context is not None:
-            signature = self.lock_key_geometry_signature(
-                context, hit['object_name'], int(hit['face_index'])
-            )
+        if context is not None:
+            self.lock_key_provider(context, hit['object_name'], hit.get('location'))
+        # A region that proves too small widens and the work reruns; full
+        # coverage can never raise, so the loop always terminates.
+        while True:
+            try:
+                centred = self.lock_key_centre_hit(context, hit)
+                signature = hit.get('geometry_signature')
+                if signature is None and context is not None:
+                    signature = self.lock_key_geometry_signature(
+                        context, hit['object_name'], int(hit['face_index'])
+                    )
+                break
+            except quicksnap_utils.LockKeyRegionTooSmall as region:
+                region.provider.widen()
         elapsed = time.perf_counter() - started
         if elapsed > 0.5:
             # The stage timers above name what they cover; this total exposes any
@@ -966,10 +988,12 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         for obj in roots:
             obj.matrix_world = delta @ obj.matrix_world
 
-    def finish_lock_key(self, context, hit):
-        source = self.lock_key_source_hit
-        if source is None or hit is None:
-            return False
+    def solve_lock_key(self, context, source, hit):
+        """One full mate attempt ladder for finish_lock_key.
+
+        Returns (delta, diagnostics); (None, None) means a stale source was
+        already reported. Raises LockKeyRegionTooSmall for the caller to widen.
+        """
         stored_signature = source.get('geometry_signature')
         if stored_signature is not None:
             current_signature = self.lock_key_geometry_signature(
@@ -981,7 +1005,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                     "Lock and key: source connector changed; pick it again",
                 )
                 self.reset_lock_key_source()
-                return False
+                return None, None
         centred = self.lock_key_centre_hit(context, hit)
         raw_source = source.get('raw_location', source['location'])
         attempts = [(source['location'], centred['location'])]
@@ -995,7 +1019,6 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             attempts.append((raw_source, hit['location']))
         diagnostics = []
         delta = None
-        solve_started = time.perf_counter()
         for source_location, target_location in attempts:
             diagnostics = []
             try:
@@ -1021,17 +1044,37 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                     target_normal=hit.get('normal'),
                     diagnostics=diagnostics,
                 )
+            except quicksnap_utils.LockKeyRegionTooSmall:
+                raise
             except Exception as error:
                 logger.warning(f"Lock and key skipped: {error}")
                 diagnostics.append(str(error))
                 delta = None
             if delta is not None:
                 break
+        return delta, diagnostics
+
+    def finish_lock_key(self, context, hit):
+        source = self.lock_key_source_hit
+        if source is None or hit is None:
+            return False
+        self.lock_key_provider(context, hit['object_name'], hit.get('location'))
+        solve_started = time.perf_counter()
+        # A region that proves too small widens and the whole mate reruns; full
+        # coverage can never raise, so the loop always terminates.
+        while True:
+            try:
+                delta, diagnostics = self.solve_lock_key(context, source, hit)
+                break
+            except quicksnap_utils.LockKeyRegionTooSmall as region:
+                region.provider.widen()
         solve_elapsed = time.perf_counter() - solve_started
         if solve_elapsed > 0.5:
             logger.warning(
                 f"Lock and key: solving the mate took {solve_elapsed:.2f}s")
         if delta is None:
+            if diagnostics is None:
+                return False  # a stale source, already reported
             # Name the actual cause: one generic message for eight different
             # failures leaves the user with nothing to try differently.
             reason = diagnostics[-1] if diagnostics else "no safe connector match"
@@ -1063,6 +1106,9 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 if hit is None:
                     lines.append(f"  {label}: no hit recorded")
                     continue
+                # The report walks to full depth, so it needs full coverage --
+                # and a diagnostic must never raise the widen signal itself.
+                self.lock_key_provider(context, hit['object_name']).force_full()
                 lines.extend(quicksnap_utils.lock_key_diagnostic_report(
                     self.lock_key_mesh_data(context, hit['object_name']),
                     int(hit['face_index']),
