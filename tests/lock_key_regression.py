@@ -608,7 +608,8 @@ def assert_source_mesh_extracted_once():
         module._lock_key_fit_data = original
     if not result:
         raise AssertionError("mate failed with the extraction cache enabled")
-    # The widen chain is 0.05 -> 0.1 -> 0.2 -> 0.4 -> full: at most 5 builds.
+    # The widen chain is 0.05 -> 0.1 -> 0.2 -> full (0.4 exceeds the 0.3
+    # ceiling and never serves as a region): at most 4 builds, 5 with slack.
     for name in (key.name, lock.name):
         if not 1 <= counts.get(name, 0) <= 5:
             raise AssertionError(
