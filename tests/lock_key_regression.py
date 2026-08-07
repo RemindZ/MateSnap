@@ -1952,6 +1952,116 @@ def assert_trim_does_not_outvote_the_real_walls():
         )
 
 
+def make_chamfered_slot_pair():
+    """A drafted bar key and a slot whose mouth carries a generous chamfer.
+
+    The shape from the reported log: the key's walls open 170.6 degrees where
+    the lock offered only its mouth chamfer's pair at about 100. A click on the
+    chamfer strip puts the anchor laterally outside the slot walls, so the real
+    wall pair cannot span it and only the trim survives -- and the slot has no
+    second lateral axis to rescue a partial match.
+    """
+    slope = math.tan(math.radians(4.7))
+    key = make_mesh(
+        "Key",
+        [
+            (-(0.55 - slope), -0.9, -1.0), (0.55 - slope, -0.9, -1.0),
+            (0.55 - slope, 0.9, -1.0), (-(0.55 - slope), 0.9, -1.0),
+            (-0.55, -0.9, 0.0), (0.55, -0.9, 0.0),
+            (0.55, 0.9, 0.0), (-0.55, 0.9, 0.0),
+        ],
+        [
+            (0, 3, 2, 1), (4, 5, 6, 7),
+            (0, 1, 5, 4), (1, 2, 6, 5),
+            (2, 3, 7, 6), (3, 0, 4, 7),   # face 5: the drafted low-x wall
+        ],
+    )
+    key.location = (2.5, -1.0, 0.0)
+    chamfer = 0.15 * math.tan(math.radians(40.0))
+    lip = 0.6 + chamfer
+    lock = make_mesh(
+        "Lock",
+        [
+            (-1.1, -1.0, 0.0), (-lip, -1.0, 0.0), (-lip, 1.0, 0.0), (-1.1, 1.0, 0.0),
+            (1.1, -1.0, 0.0), (lip, -1.0, 0.0), (lip, 1.0, 0.0), (1.1, 1.0, 0.0),
+            (-0.6, -1.0, -0.15), (-0.6, 1.0, -0.15),
+            (0.6, -1.0, -0.15), (0.6, 1.0, -0.15),
+            (-0.6, -1.0, -1.2), (-0.6, 1.0, -1.2),
+            (0.6, -1.0, -1.2), (0.6, 1.0, -1.2),
+        ],
+        [
+            (0, 1, 2, 3),          # top strip beside the low-x lip
+            (5, 4, 7, 6),          # top strip beside the high-x lip
+            (1, 8, 9, 2),          # face 2: low-x mouth chamfer (clicked)
+            (10, 5, 6, 11),        # high-x mouth chamfer
+            (8, 12, 13, 9),        # face 4: low-x slot wall
+            (14, 10, 11, 15),      # high-x slot wall
+            (12, 14, 15, 13),      # slot floor
+        ],
+    )
+    bpy.context.view_layer.update()
+    key_hit = key.matrix_world @ Vector((-(0.55 - slope * 0.4), 0.0, -0.4))
+    chamfer_hit = lock.matrix_world @ Vector((-(0.6 + chamfer * 0.5), 0.05, -0.075))
+    wall_centre = lock.matrix_world @ Vector((-0.6, 0.0, -0.675))
+    return key, 5, key_hit, lock, 2, chamfer_hit, 4, wall_centre
+
+
+def assert_chamfer_click_names_its_wall():
+    """A click on the mouth chamfer mates as if the wall itself had been named.
+
+    From a real kit report: the parts fit and were rotated correctly, yet the
+    mate was refused for a taper mismatch between a straight wall and the
+    chamfer's own 100-degree pair. The trim knows which corner it softened, so
+    the click is promoted to the wall -- and with centring off the pick is the
+    user's exact point again, so only the honest refusal remains.
+    """
+    clear_scene()
+    key, key_face, key_hit, lock, chamfer_face, chamfer_hit, wall_face, \
+        wall_centre = make_chamfered_slot_pair()
+    settings = SimpleNamespace(ignore_modifiers=True)
+
+    # Teeth: with promotion off (centring off), the chamfer click reproduces the
+    # reported refusal, naming the two openings.
+    diagnostics = []
+    refused = quicksnap_utils.compute_lock_key_transform(
+        bpy.context,
+        SimpleNamespace(ignore_modifiers=True, lock_and_key_centre_picks=False),
+        "Key", key_face, key_hit, "Lock", chamfer_face, chamfer_hit,
+        diagnostics=diagnostics,
+    )
+    if refused is not None:
+        raise AssertionError(
+            "the fixture no longer reproduces the chamfer-click refusal"
+        )
+    if not any("are not parallel" in line for line in diagnostics):
+        raise AssertionError(
+            f"expected the taper-mismatch refusal, got: {diagnostics}"
+        )
+
+    control = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, settings,
+        "Key", key_face, key_hit, "Lock", wall_face, wall_centre,
+    )
+    if control is None:
+        raise AssertionError("the wall-centre control click failed to mate")
+    promoted = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, settings,
+        "Key", key_face, key_hit, "Lock", chamfer_face, chamfer_hit,
+    )
+    if promoted is None:
+        raise AssertionError("the chamfer click was not promoted to its wall")
+    difference = max(
+        abs(promoted[row][column] - control[row][column])
+        for row in range(4) for column in range(4)
+    )
+    if difference > 1e-5:
+        raise AssertionError(
+            "promotion seated the key differently from naming the wall:"
+            f" {tuple(promoted.to_translation())} vs"
+            f" {tuple(control.to_translation())}"
+        )
+
+
 def assert_parting_plane_click_is_named():
     """Clicking the flat face two halves meet on must say so.
 
@@ -2095,6 +2205,8 @@ def main():
     print("a peg in reach is not a flat face: PASS")
     assert_trim_does_not_outvote_the_real_walls()
     print("mouth trim does not outvote the real walls: PASS")
+    assert_chamfer_click_names_its_wall()
+    print("chamfer click names its wall: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()

@@ -117,6 +117,8 @@ Amended 2026-07-29: each click is first moved to the area-weighted centroid of t
 
 The centering correction retains the existing local trust principle: it may balance designed clearance but may not relocate the key to a different feature.
 
+Amended 2026-08-07: a click on mouth trim is promoted to the wall the trim softens, as part of the same centring preference. A chamfer or lead-in is a narrow strip -- its mean width no more than a quarter of its extent -- whose plane roughly bisects a much larger neighbouring face (25 to 65 degrees off, at least twice its area); a dovetail flank or V-groove side is broad and never qualifies. An anchor left on such a strip sits laterally outside the walls, so the real pair cannot span the click and only the trim's own pair survives: the reported failure measured a straight key against the chamfer's 100-degree opening and refused a fitting part -- or worse, mated on a perpendicular axis alone and silently seated the key half a chamfer off. Promotion therefore runs BEFORE the direct solve, not as a retry after it, because the wrong mate never reaches a retry. Which bisected face was meant cannot be read locally -- the strip splits its corner symmetrically -- so every candidate wall is tried and the mate decides: one seating wins, several different seatings fail closed, and none at all falls through to the direct solve and its existing refusals. Turning `lock_and_key_centre_picks` off disables promotion with the rest of pick centring.
+
 ### Optional rigid alignment
 
 When `lock_and_key_rotate` is enabled:

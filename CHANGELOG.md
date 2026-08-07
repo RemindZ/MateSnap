@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.13
+
+### Fixed
+- **A click on the mouth chamfer names its wall.** Clicking the chamfered lip of
+  a socket left the anchor laterally outside the walls, so the real wall pair
+  could not span the click and only the chamfer's own ~100-degree pair survived:
+  a fitting, correctly rotated part was refused for "a chamfer or a taper rather
+  than the straight wall" -- or, when a perpendicular pair still matched, silently
+  seated half a chamfer off. Such a click is now promoted to the wall the chamfer
+  softens (part of the pick-centring preference); when more than one wall fits
+  differently, the mate still fails closed.
+- **First Lock and key click no longer stalls on dense parts.** Growing the
+  clicked wall walked polygon by polygon in Python -- 6.5 seconds on a 200k-face
+  wall, minutes on a real figurine half -- and fingerprinting the click's
+  neighbourhood added seconds more. The growth now walks whole frontiers as
+  numpy batches (0.19s on the same wall) and the fingerprint samples a bounded
+  stride of the neighbourhood instead of every polygon.
+- **No more console spam when the snap point is behind the view.** The 2D draw
+  callback subscripted a projection that is None for points behind the view
+  plane, throwing a TypeError every redraw.
+
 ## 1.8.12
 
 ### Fixed

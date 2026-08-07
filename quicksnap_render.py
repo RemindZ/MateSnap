@@ -597,6 +597,8 @@ def draw_callback_2d(self, context):
         source_position_2d = bpy_extras.view3d_utils.location_3d_to_region_2d(context.region,
                                                                               context.space_data.region_3d,
                                                                               source_position_3d)
+        if source_position_2d is None:  # behind the view plane, nothing to draw
+            return
         source_x, source_y = source_position_2d[0], source_position_2d[1]
         # Source selection
         if self.current_state == State.IDLE:  # no source picked
@@ -615,6 +617,8 @@ def draw_callback_2d(self, context):
                 target_position_2d = bpy_extras.view3d_utils.location_3d_to_region_2d(context.region,
                                                                                       context.space_data.region_3d,
                                                                                       self.target)
+                if target_position_2d is None:  # behind the view plane
+                    return
                 target_x, target_y = target_position_2d[0], target_position_2d[1]
 
                 if self.closest_target_id >= 0:
@@ -622,7 +626,7 @@ def draw_callback_2d(self, context):
                         context.region,
                         context.space_data.region_3d,
                         self.snapdata_target.world_space[self.closest_target_id])
-                    if len(self.snapping) > 0:
+                    if len(self.snapping) > 0 and snap_target_2d is not None:
                         draw_square_2d(target_x, target_y, square_width,
                                        color=color, line_width=0)  # dot to target
                         draw_square_2d(snap_target_2d[0], snap_target_2d[1], square_width, color=color)  # square to snapped point

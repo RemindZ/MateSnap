@@ -274,38 +274,88 @@ def _edge_neighbors(mesh_data, edge_index):
     return mesh_data['edge_polygons'][start:end]
 
 
+def _csr_ranges(starts, counts):
+    """Flat indices covering [start, start + count) per row, without a Python loop."""
+    total = int(counts.sum())
+    if total == 0:
+        return np.empty(0, dtype=np.int64)
+    firsts = np.cumsum(counts) - counts
+    offsets = np.arange(total, dtype=np.int64) - np.repeat(firsts, counts)
+    return np.repeat(starts, counts).astype(np.int64) + offsets
+
+
+def _polygon_areas(mesh_data, polygon_indices):
+    """World-space areas of many polygons at once, grouped by vertex count.
+
+    Same fan triangulation as _polygon_geometry, batched: a merged figurine wall
+    holds hundreds of thousands of polygons and a per-polygon call is seconds of
+    pure Python on the first click.
+    """
+    loop_starts = mesh_data['loop_starts'][polygon_indices]
+    loop_totals = mesh_data['loop_totals'][polygon_indices]
+    vertices = mesh_data['vertices']
+    loop_vertices = mesh_data['loop_vertices']
+    areas = np.zeros(len(polygon_indices), dtype=np.float64)
+    for total in np.unique(loop_totals):
+        if total < 3:
+            continue
+        rows = np.nonzero(loop_totals == total)[0]
+        slots = loop_starts[rows][:, None] + np.arange(int(total))[None, :]
+        coords = vertices[loop_vertices[slots]]
+        fans = np.cross(coords[:, 1:-1] - coords[:, :1], coords[:, 2:] - coords[:, :1])
+        areas[rows] = 0.5 * np.linalg.norm(fans, axis=2).sum(axis=1)
+    return areas
+
+
 def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
     if seed_polygon in mesh_data['polygon_patches']:
         return mesh_data['polygon_patches'][seed_polygon]
 
-    component = {int(seed_polygon)}
-    queue = [int(seed_polygon)]
-    while queue:
-        polygon_index = queue.pop()
-        start = int(mesh_data['loop_starts'][polygon_index])
-        total = int(mesh_data['loop_totals'][polygon_index])
-        normal = mesh_data['polygon_normals'][polygon_index]
-        center = mesh_data['polygon_centers'][polygon_index]
-        for edge_index in mesh_data['loop_edges'][start:start + total]:
-            tolerance = max(0.005 * float(mesh_data['edge_lengths'][edge_index]), _FIT_ABS_TOL)
-            for neighbor in _edge_neighbors(mesh_data, int(edge_index)):
-                neighbor = int(neighbor)
-                if neighbor in component:
-                    continue
-                neighbor_normal = mesh_data['polygon_normals'][neighbor]
-                if float(normal @ neighbor_normal) < cos_planar:
-                    continue
-                neighbor_center = mesh_data['polygon_centers'][neighbor]
-                if abs(float((neighbor_center - center) @ normal)) > tolerance:
-                    continue
-                if abs(float((center - neighbor_center) @ neighbor_normal)) > tolerance:
-                    continue
-                component.add(neighbor)
-                queue.append(neighbor)
+    normals = mesh_data['polygon_normals']
+    centers = mesh_data['polygon_centers']
+    loop_starts = mesh_data['loop_starts']
+    loop_totals = mesh_data['loop_totals']
+    loop_edges = mesh_data['loop_edges']
+    edge_starts = mesh_data['edge_starts']
+    edge_polygons = mesh_data['edge_polygons']
+    edge_lengths = mesh_data['edge_lengths']
 
-    polygon_indices = np.array(sorted(component), dtype=np.int32)
-    geometry = [_polygon_geometry(mesh_data, int(index)) for index in polygon_indices]
-    areas = np.array([item['area'] for item in geometry], dtype=np.float64)
+    # The fill walks whole frontiers as numpy batches. Membership is the same
+    # fixpoint as the polygon-at-a-time walk -- a polygon joins when any accepted
+    # polygon reaches it across a qualifying edge -- but a dense figurine wall
+    # spans hundreds of thousands of faces, and per-polygon Python took seconds
+    # per click on meshes this fork exists for.
+    in_component = np.zeros(len(loop_starts), dtype=bool)
+    in_component[int(seed_polygon)] = True
+    frontier = np.array([int(seed_polygon)], dtype=np.int64)
+    while frontier.size:
+        edges = loop_edges[_csr_ranges(loop_starts[frontier], loop_totals[frontier])]
+        sources = np.repeat(frontier, loop_totals[frontier])
+        fanout = edge_starts[edges + 1] - edge_starts[edges]
+        neighbors = edge_polygons[_csr_ranges(edge_starts[edges], fanout)]
+        sources = np.repeat(sources, fanout)
+        edges = np.repeat(edges, fanout)
+        candidate = ~in_component[neighbors]
+        neighbors = neighbors[candidate]
+        sources = sources[candidate]
+        edges = edges[candidate]
+        if not neighbors.size:
+            break
+        tolerance = np.maximum(0.005 * edge_lengths[edges], _FIT_ABS_TOL)
+        source_normals = normals[sources]
+        neighbor_normals = normals[neighbors]
+        separation = centers[neighbors] - centers[sources]
+        keep = (
+            (np.einsum('ij,ij->i', source_normals, neighbor_normals) >= cos_planar)
+            & (np.abs(np.einsum('ij,ij->i', separation, source_normals)) <= tolerance)
+            & (np.abs(np.einsum('ij,ij->i', separation, neighbor_normals)) <= tolerance)
+        )
+        frontier = np.unique(neighbors[keep])
+        in_component[frontier] = True
+
+    polygon_indices = np.nonzero(in_component)[0].astype(np.int32)
+    component = {int(index) for index in polygon_indices}
+    areas = _polygon_areas(mesh_data, polygon_indices)
     total_area = float(areas.sum())
     patch = None
     if total_area > 0:
@@ -314,24 +364,35 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
         normal_length = float(np.linalg.norm(normal))
         if normal_length > 0:
             normal /= normal_length
-            vertex_indices = np.unique(np.concatenate([item['vertices'] for item in geometry]))
+            loop_slots = _csr_ranges(
+                mesh_data['loop_starts'][polygon_indices],
+                mesh_data['loop_totals'][polygon_indices],
+            )
+            vertex_indices = np.unique(mesh_data['loop_vertices'][loop_slots])
             coordinates = mesh_data['vertices'][vertex_indices]
             extent = float(np.linalg.norm(coordinates.max(axis=0) - coordinates.min(axis=0)))
             tolerance = max(0.005 * extent, _FIT_ABS_TOL)
             residual = float(np.max(np.abs((mesh_data['polygon_centers'][polygon_indices] - point) @ normal)))
             if extent > 0 and residual <= tolerance:
-                boundary_edges = set()
-                for polygon_index in polygon_indices:
-                    start = int(mesh_data['loop_starts'][polygon_index])
-                    total = int(mesh_data['loop_totals'][polygon_index])
-                    for edge_index in mesh_data['loop_edges'][start:start + total]:
-                        neighbors = _edge_neighbors(mesh_data, int(edge_index))
-                        if any(int(neighbor) not in component for neighbor in neighbors):
-                            boundary_edges.add(int(edge_index))
+                # An edge is boundary when any polygon it carries fell outside the
+                # component; edges owned by the mesh border alone never qualify,
+                # exactly as before.
+                component_edges = np.unique(mesh_data['loop_edges'][loop_slots])
+                fanout = (
+                    mesh_data['edge_starts'][component_edges + 1]
+                    - mesh_data['edge_starts'][component_edges]
+                )
+                adjacent = mesh_data['edge_polygons'][_csr_ranges(
+                    mesh_data['edge_starts'][component_edges], fanout
+                )]
+                outside = ~in_component[adjacent]
+                boundary_edges = np.unique(
+                    np.repeat(component_edges, fanout)[outside]
+                )
                 patch = {
                     'id': tuple(int(index) for index in polygon_indices),
                     'polygons': component,
-                    'boundary_edges': tuple(sorted(boundary_edges)),
+                    'boundary_edges': tuple(int(edge) for edge in boundary_edges),
                     'point': point,
                     'normal': normal,
                     'area': total_area,
@@ -736,6 +797,70 @@ def clicked_patch_centre(mesh_data, face_index):
     if patch is None:
         return None
     return Vector(tuple(float(value) for value in patch['point']))
+
+
+# A mouth chamfer or lead-in is a narrow strip whose plane sits roughly midway
+# between the corner faces it replaced. A connector wall never reads this way:
+# it meets its neighbours near 90 degrees, and an angled wall someone modelled
+# on purpose -- a dovetail flank, a V-groove side -- is broad, not a strip.
+# The strip's mean width is its area over its extent; a square patch fails the
+# quarter-extent bar while anything longer than about four times its width
+# passes.
+_TRIM_BISECT_MIN_DOT = math.cos(math.radians(65.0))
+_TRIM_BISECT_MAX_DOT = math.cos(math.radians(25.0))
+_TRIM_MAX_WIDTH_FRACTION = 0.25
+_TRIM_MIN_NEIGHBOUR_RATIO = 2.0
+
+
+def trim_click_promotions(mesh_data, face_index):
+    """The walls a click on edge trim could have meant, largest first.
+
+    A click on a chamfer names the wall the chamfer softens, not the strip
+    itself: the strip's own plane mates with nothing, and an anchor on it sits
+    laterally outside the walls, so the real pair cannot span it. Which of the
+    two bisected faces was meant cannot be read locally -- the strip splits
+    their corner symmetrically -- so every candidate comes back and the caller
+    lets the mate decide, failing closed when more than one fits differently.
+    Returns [] whenever the clicked patch is not such trim.
+    """
+    index = int(face_index)
+    if index < 0 or index >= len(mesh_data['polygon_normals']):
+        return []
+    try:
+        clicked = _grow_planar_patch(mesh_data, index)
+    except Exception:
+        return []
+    if clicked is None:
+        return []
+    extent = float(clicked['extent'])
+    area = float(clicked['area'])
+    if extent <= 0.0 or area <= 0.0:
+        return []
+    if area / extent > _TRIM_MAX_WIDTH_FRACTION * extent:
+        return []
+    neighbours = {}
+    for edge_index in clicked['boundary_edges']:
+        for polygon_index in _edge_neighbors(mesh_data, int(edge_index)):
+            polygon_index = int(polygon_index)
+            if polygon_index in clicked['polygons']:
+                continue
+            patch = _grow_planar_patch(mesh_data, polygon_index)
+            if patch is not None and patch['id'] != clicked['id']:
+                neighbours[patch['id']] = patch
+    bisected = [
+        patch for patch in neighbours.values()
+        if float(patch['area']) >= _TRIM_MIN_NEIGHBOUR_RATIO * area
+        and _TRIM_BISECT_MIN_DOT
+        <= float(patch['normal'] @ clicked['normal'])
+        <= _TRIM_BISECT_MAX_DOT
+    ]
+    return [
+        {
+            'face_index': int(min(patch['polygons'])),
+            'location': Vector(tuple(float(value) for value in patch['point'])),
+        }
+        for patch in sorted(bisected, key=lambda patch: -float(patch['area']))
+    ]
 
 
 # A plain box peg reaches its far wall in two patch hops. Every chamfer or fillet
@@ -1741,7 +1866,7 @@ def compute_lock_key_transform(
         allow_rotation=False,
         source_mesh_data=None, target_mesh_data=None,
         source_normal=None, target_normal=None,
-        diagnostics=None):
+        diagnostics=None, allow_promotion=True):
     """Return one safe world delta for a two-surface-click connector mate.
 
     The caller may hand in already-extracted mesh data; extraction dominates the
@@ -1776,6 +1901,54 @@ def compute_lock_key_transform(
     if not source_seeds or not target_seeds:
         _note_lock_key_skip(diagnostics, "the clicked face no longer exists; pick again")
         return None
+    # A click on mouth trim must be promoted BEFORE the direct solve, not retried
+    # after it: an anchor on the chamfer can also succeed wrongly -- a
+    # perpendicular pair still matches while the clicked axis silently comes from
+    # the trim -- and that mate never reaches any retry. Promotion is part of pick
+    # centring ("move the pick to the feature it names"), so it obeys the same
+    # preference.
+    if allow_promotion and getattr(settings, 'lock_and_key_centre_picks', True):
+        source_options = [(source_face_index, source_hit)] + [
+            (promotion['face_index'], promotion['location'])
+            for promotion in trim_click_promotions(source_data, source_face_index)
+        ]
+        target_options = [(target_face_index, target_hit)] + [
+            (promotion['face_index'], promotion['location'])
+            for promotion in trim_click_promotions(target_data, target_face_index)
+        ]
+        if len(source_options) > 1 or len(target_options) > 1:
+            deltas = []
+            for source_at, (source_face, source_point) in enumerate(source_options):
+                for target_at, (target_face, target_point) in enumerate(target_options):
+                    if source_at == 0 and target_at == 0:
+                        continue
+                    candidate = compute_lock_key_transform(
+                        context, settings,
+                        source_object_name, source_face, source_point,
+                        target_object_name, target_face, target_point,
+                        allow_rotation=allow_rotation,
+                        source_mesh_data=source_data, target_mesh_data=target_data,
+                        source_normal=source_normal, target_normal=target_normal,
+                        diagnostics=None, allow_promotion=False,
+                    )
+                    if candidate is not None:
+                        deltas.append(candidate)
+            if deltas:
+                first = np.array(deltas[0], dtype=np.float64)
+                if all(
+                    float(np.max(np.abs(np.array(other, dtype=np.float64) - first)))
+                    <= 1e-5
+                    for other in deltas[1:]
+                ):
+                    return deltas[0]
+                _note_lock_key_skip(
+                    diagnostics,
+                    "the click landed on the chamfer between two walls and each"
+                    " wall gives a different mate -- click the connector wall"
+                    " itself, past the chamfer")
+                return None
+            # No promoted mate: fall through to the direct solve, whose refusals
+            # name what to do differently.
     source_anchor = np.array(source_hit, dtype=np.float64)
     target_anchor = np.array(target_hit, dtype=np.float64)
     source_pairs, source_reason = _connector_pairs(

@@ -613,9 +613,16 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         )
         if not polygon_indices:
             return None
+        # A merged wall on a dense figurine holds hundreds of thousands of
+        # polygons, and fingerprinting each one is seconds of pure Python on the
+        # first click. A deterministic stride keeps the guard: element counts and
+        # the matrix catch topology and transform edits, the sample catches edits
+        # near the click. Strided, never random -- equality is the whole check.
+        stride = max(1, len(polygon_indices) // 512)
+        sampled = polygon_indices[::stride]
         neighborhood = []
         try:
-            for polygon_index in polygon_indices:
+            for polygon_index in sampled:
                 if polygon_index >= len(mesh.polygons):
                     return None
                 polygon = mesh.polygons[polygon_index]
