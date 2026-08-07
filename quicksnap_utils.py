@@ -168,25 +168,47 @@ _FIT_ANGLE_5 = 5.0
 _FIT_ABS_TOL = 1e-7
 
 
-def _mesh_fit_data(obj):
+# Extraction dominates every mate on dense parts, and the same unmoved base was
+# re-extracted for mate after mate -- 6.6s per click on a 5.5M-polygon figure.
+# The topology and local geometry are cached across runs and revalidated
+# bit-for-bit against the live mesh: coordinates and loop connectivity are
+# re-read and compared, so an edit that keeps every element count (sculpting
+# does) still invalidates. Never trusted without that comparison. World-space
+# products are rebuilt per call, so a moved object reuses its topology at only
+# the transform cost.
+# ponytail: keeps the last three meshes (~150MB per million polygons); raise the
+# limit if kits routinely juggle more parts than that.
+_EXTRACTION_CACHE = {}
+_EXTRACTION_CACHE_LIMIT = 3
+
+
+def _local_mesh_data(obj):
     mesh = obj.data
-    vertex_count = len(mesh.vertices)
-    polygon_count = len(mesh.polygons)
-    loop_count = len(mesh.loops)
-    edge_count = len(mesh.edges)
+    key = (obj.name, bool(getattr(obj, 'is_evaluated', False)))
+    counts = (
+        len(mesh.vertices), len(mesh.edges), len(mesh.polygons), len(mesh.loops)
+    )
+    vertex_count, edge_count, polygon_count, loop_count = counts
 
     vertices = np.empty(vertex_count * 3, dtype=np.float64)
     mesh.vertices.foreach_get('co', vertices)
     vertices.shape = (vertex_count, 3)
-    matrix = np.array(obj.matrix_world, dtype=np.float64)
-    inverse = np.array(obj.matrix_world.inverted(), dtype=np.float64)
-    vertices = vertices @ matrix[:3, :3].T + matrix[:3, 3]
-
     loop_vertices = np.empty(loop_count, dtype=np.int32)
-    loop_edges = np.empty(loop_count, dtype=np.int32)
     mesh.loops.foreach_get('vertex_index', loop_vertices)
-    mesh.loops.foreach_get('edge_index', loop_edges)
 
+    cached = _EXTRACTION_CACHE.get(key)
+    if (
+        cached is not None
+        and cached['counts'] == counts
+        and np.array_equal(cached['vertices'], vertices)
+        and np.array_equal(cached['loop_vertices'], loop_vertices)
+    ):
+        _EXTRACTION_CACHE.pop(key)
+        _EXTRACTION_CACHE[key] = cached
+        return cached
+
+    loop_edges = np.empty(loop_count, dtype=np.int32)
+    mesh.loops.foreach_get('edge_index', loop_edges)
     loop_starts = np.empty(polygon_count, dtype=np.int32)
     loop_totals = np.empty(polygon_count, dtype=np.int32)
     centers = np.empty(polygon_count * 3, dtype=np.float64)
@@ -197,38 +219,76 @@ def _mesh_fit_data(obj):
     mesh.polygons.foreach_get('normal', normals)
     centers.shape = (polygon_count, 3)
     normals.shape = (polygon_count, 3)
-    centers = centers @ matrix[:3, :3].T + matrix[:3, 3]
-    normals = normals @ inverse[:3, :3]
-    lengths = np.linalg.norm(normals, axis=1)
-    lengths[lengths == 0] = 1.0
-    normals /= lengths[:, None]
-
     edge_vertices = np.empty(edge_count * 2, dtype=np.int32)
     mesh.edges.foreach_get('vertices', edge_vertices)
     edge_vertices.shape = (edge_count, 2)
-    edge_lengths = np.linalg.norm(vertices[edge_vertices[:, 0]] - vertices[edge_vertices[:, 1]], axis=1)
 
     loop_polygons = np.repeat(np.arange(polygon_count, dtype=np.int32), loop_totals)
     edge_order = np.argsort(loop_edges, kind='stable')
     edge_counts = np.bincount(loop_edges, minlength=edge_count)
     edge_starts = np.concatenate(([0], np.cumsum(edge_counts)))
 
-    return {
-        'mesh': mesh,
+    local = {
+        'counts': counts,
         'vertices': vertices,
         'loop_vertices': loop_vertices,
         'loop_edges': loop_edges,
         'loop_starts': loop_starts,
         'loop_totals': loop_totals,
         'loop_polygons': loop_polygons,
+        'centers': centers,
+        'normals': normals,
+        'edge_vertices': edge_vertices,
+        'edge_polygons': loop_polygons[edge_order],
+        'edge_starts': edge_starts,
+    }
+    _EXTRACTION_CACHE.pop(key, None)
+    _EXTRACTION_CACHE[key] = local
+    while len(_EXTRACTION_CACHE) > _EXTRACTION_CACHE_LIMIT:
+        _EXTRACTION_CACHE.pop(next(iter(_EXTRACTION_CACHE)))
+    return local
+
+
+def _mesh_fit_data(obj):
+    local = _local_mesh_data(obj)
+    matrix = np.array(obj.matrix_world, dtype=np.float64)
+    # An unmoved object -- the base a kit assembles onto, mate after mate --
+    # reuses its whole world-space product, grown patches included: those are
+    # deterministic in this data, so unchanged input means unchanged patches.
+    matrix_key = matrix.tobytes()
+    cached_world = local.get('world')
+    if cached_world is not None and cached_world[0] == matrix_key:
+        return cached_world[1]
+    inverse = np.array(obj.matrix_world.inverted(), dtype=np.float64)
+    # New arrays throughout -- the cached local geometry is never written to.
+    vertices = local['vertices'] @ matrix[:3, :3].T + matrix[:3, 3]
+    centers = local['centers'] @ matrix[:3, :3].T + matrix[:3, 3]
+    normals = local['normals'] @ inverse[:3, :3]
+    lengths = np.linalg.norm(normals, axis=1)
+    lengths[lengths == 0] = 1.0
+    normals /= lengths[:, None]
+    edge_vertices = local['edge_vertices']
+    edge_lengths = np.linalg.norm(
+        vertices[edge_vertices[:, 0]] - vertices[edge_vertices[:, 1]], axis=1
+    )
+
+    world = {
+        'vertices': vertices,
+        'loop_vertices': local['loop_vertices'],
+        'loop_edges': local['loop_edges'],
+        'loop_starts': local['loop_starts'],
+        'loop_totals': local['loop_totals'],
+        'loop_polygons': local['loop_polygons'],
         'polygon_centers': centers,
         'polygon_normals': normals,
         'edge_lengths': edge_lengths,
-        'edge_polygons': loop_polygons[edge_order],
-        'edge_starts': edge_starts,
+        'edge_polygons': local['edge_polygons'],
+        'edge_starts': local['edge_starts'],
         'polygon_geometry': {},
         'polygon_patches': {},
     }
+    local['world'] = (matrix_key, world)
+    return world
 
 
 def _seed_polygons(mesh_data, snap_type, element_index):
@@ -919,22 +979,29 @@ def _merge_coplanar_patches(patches):
     plane_tolerance = max(0.005 * span, _FIT_ABS_TOL)
 
     groups = []
+    # One row per group, so each patch tests every group in one numpy pass: this
+    # runs once per search radius per click, and a dense part reaches ~1800
+    # patches against ~240 groups, which a Python inner loop paid in seconds.
+    group_normals = np.empty((0, 3), dtype=np.float64)
+    group_offsets = np.empty(0, dtype=np.float64)
     # Largest first, so a group's plane is anchored on its most reliable member.
     for patch in sorted(patches, key=lambda item: -float(item['area'])):
-        for group in groups:
-            if float(patch['normal'] @ group['normal']) < _FIT_COS_5:
-                continue
-            offset = float(group['normal'] @ (patch['point'] - group['point']))
-            if abs(offset) > plane_tolerance:
-                continue
-            group['members'].append(patch)
-            break
+        if groups:
+            dots = group_normals @ patch['normal']
+            offsets = group_normals @ patch['point'] - group_offsets
+            fits = np.nonzero(
+                (dots >= _FIT_COS_5) & (np.abs(offsets) <= plane_tolerance)
+            )[0]
         else:
-            groups.append({
-                'normal': np.array(patch['normal'], dtype=np.float64),
-                'point': np.array(patch['point'], dtype=np.float64),
-                'members': [patch],
-            })
+            fits = np.empty(0, dtype=np.int64)
+        if len(fits):
+            groups[int(fits[0])]['members'].append(patch)
+        else:
+            normal = np.array(patch['normal'], dtype=np.float64)
+            point = np.array(patch['point'], dtype=np.float64)
+            groups.append({'members': [patch]})
+            group_normals = np.vstack((group_normals, normal))
+            group_offsets = np.append(group_offsets, normal @ point)
 
     merged = []
     for group in groups:
@@ -2038,11 +2105,18 @@ def compute_lock_key_transform(
                     f" ({len(source_pairs)} key / {len(target_pairs)} lock"
                     " wall pairs)")
         else:
+            # Far-apart clicks are exactly what pick centring exists to absorb,
+            # so when it is off, name the setting rather than only the symptom.
+            centring_hint = (
+                "" if getattr(settings, 'lock_and_key_centre_picks', True)
+                else ", or turn 'Centre picks' back on so both clicks move to"
+                " the middle of their walls"
+            )
             _note_lock_key_skip(
                 diagnostics,
                 f"{len(matches)} matched wall pair(s) could not be centred within"
                 " tolerance -- the two clicks may be too far apart, or enable"
-                " 'Rotate key to match lock'")
+                f" 'Rotate key to match lock'{centring_hint}")
         return None
 
     valid = []

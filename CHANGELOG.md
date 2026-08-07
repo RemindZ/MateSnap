@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.8.15
+
+### Fixed
+- **Dense parts are no longer re-extracted for every mate.** The stage timers
+  named the stall: 6.6s to extract a 5.5M-polygon figure, paid again on every
+  mate, plus 2.9s for the unmoved base it assembles onto. Extraction is now
+  cached across mates and revalidated bit-for-bit against the live mesh --
+  coordinates and connectivity are re-read and compared, so an edit that keeps
+  every element count (sculpting does) still rebuilds. An unmoved part reuses
+  everything, grown patches included, at only the validation cost; a moved part
+  additionally pays one transform pass.
+- **The solve no longer spends seconds regrouping walls.** Merging coplanar
+  patches ran a Python loop of every patch against every group once per search
+  radius per click -- ~1800 patches against ~240 groups on the reported base.
+  Each patch now tests all groups in one numpy pass.
+- **The could-not-centre refusal names 'Centre picks' when it is off.**
+  Far-apart clicks are exactly what pick centring absorbs, and the reported
+  refusal (5 matched pairs, centring past tolerance) had it disabled -- the
+  message now says to turn it back on instead of only describing the symptom.
+
 ## 1.8.14
 
 ### Fixed
