@@ -6,6 +6,7 @@ import json
 import logging
 import numpy as np
 import os
+import time
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
@@ -560,10 +561,18 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         fit_obj = self.lock_key_fit_object(context, object_name)
         if fit_obj is None:
             return None
+        started = time.perf_counter()
         try:
             mesh_data = quicksnap_utils._mesh_fit_data(fit_obj)
         except Exception:
             return None
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.25:
+            # A slow pick must name its stage in the console: users' models are
+            # proprietary, so the log is the only place a stall can be diagnosed.
+            logger.warning(
+                f"Lock and key: extracting {object_name} took {elapsed:.2f}s"
+                f" ({len(mesh_data['loop_starts'])} polygons)")
         self._lock_key_mesh_cache[object_name] = mesh_data
         return mesh_data
 
@@ -580,6 +589,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         mesh_data = self.lock_key_mesh_data(context, object_name)
         if mesh_data is None:
             return None
+        started = time.perf_counter()
         try:
             seeds = quicksnap_utils._seed_polygons(
                 mesh_data, 'FACES', face_index
@@ -592,6 +602,12 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         polygon_indices = tuple(sorted(set().union(
             *(patch['polygons'] for patch in patches)
         )))
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.25:
+            logger.warning(
+                f"Lock and key: growing the click's neighbourhood on"
+                f" {object_name} took {elapsed:.2f}s ({len(patches)} patches,"
+                f" {len(polygon_indices)} polygons)")
         self._lock_key_patch_cache[cache_key] = polygon_indices
         return polygon_indices
 
@@ -697,11 +713,18 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return cached[1]
         if len(mesh.polygons) == 0:
             return None
+        started = time.perf_counter()
         tree = BVHTree.FromPolygons(
             [vertex.co.copy() for vertex in mesh.vertices],
             [tuple(polygon.vertices) for polygon in mesh.polygons],
             all_triangles=False,
         )
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.25:
+            logger.warning(
+                f"Lock and key: building the raw-mesh picking tree for"
+                f" {obj.name} took {elapsed:.2f}s"
+                f" ({len(mesh.polygons)} polygons)")
         self._lock_key_bvh_cache[obj.name] = (signature, tree)
         return tree
 
@@ -889,10 +912,16 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             or not getattr(self.settings, 'lock_and_key_centre_picks', True)
         ):
             return hit
+        started = time.perf_counter()
         centre = quicksnap_utils.clicked_patch_centre(
             self.lock_key_mesh_data(context, hit['object_name']),
             hit['face_index'],
         )
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.25:
+            logger.warning(
+                f"Lock and key: growing the clicked wall on"
+                f" {hit['object_name']} took {elapsed:.2f}s")
         if centre is None:
             return hit
         centred = dict(hit)
@@ -900,12 +929,20 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         return centred
 
     def record_lock_key_source(self, hit, context=None):
+        started = time.perf_counter()
         centred = self.lock_key_centre_hit(context, hit)
         signature = hit.get('geometry_signature')
         if signature is None and context is not None:
             signature = self.lock_key_geometry_signature(
                 context, hit['object_name'], int(hit['face_index'])
             )
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.5:
+            # The stage timers above name what they cover; this total exposes any
+            # stall they do not.
+            logger.warning(
+                f"Lock and key: recording the first pick took {elapsed:.2f}s"
+                f" in total on {hit['object_name']}")
         normal = hit.get('normal')
         self.lock_key_source_hit = {
             'object_name': hit['object_name'],
@@ -958,6 +995,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             attempts.append((raw_source, hit['location']))
         diagnostics = []
         delta = None
+        solve_started = time.perf_counter()
         for source_location, target_location in attempts:
             diagnostics = []
             try:
@@ -989,6 +1027,10 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 delta = None
             if delta is not None:
                 break
+        solve_elapsed = time.perf_counter() - solve_started
+        if solve_elapsed > 0.5:
+            logger.warning(
+                f"Lock and key: solving the mate took {solve_elapsed:.2f}s")
         if delta is None:
             # Name the actual cause: one generic message for eight different
             # failures leaves the user with nothing to try differently.

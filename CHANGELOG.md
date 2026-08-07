@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.14
+
+### Fixed
+- **A slow pick now names its stage in the console.** A report of "the first
+  click takes forever" could not be pinned to a stage from here, and users'
+  models are proprietary, so the log has to do the measuring: mesh extraction,
+  clicked-wall growth, neighbourhood growth, raw-mesh picking tree, and the
+  mate solve each print a warning with their time and size whenever they exceed
+  a quarter second, plus a total for anything they do not cover.
+
 ## 1.8.13
 
 ### Fixed
