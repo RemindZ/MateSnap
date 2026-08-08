@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.8.17
+
+### Fixed
+- **The picker opens instantly on dense scenes.** Starting Lock and key ran a
+  preview raycast before the modal was live, and the first ray against a dense
+  part makes Blender build its internal picking BVH -- seconds of dead viewport
+  between the hotkey and the crosshair. The modal refreshes the preview on
+  every mouse move and again on click before using it, so that eager raycast
+  bought nothing; it is gone, and the one-time build now happens under the
+  first mouse move. The opening and the first hover both report their time to
+  the console when they exceed a quarter second.
+
 ## 1.8.16
 
 ### Fixed

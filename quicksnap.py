@@ -171,7 +171,11 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.clickdrag = False
         self.last_event = None
         self.clicktime = 0
-        self.update_lock_key_preview(context, region)
+        # No preview raycast here: first contact with a dense part makes Blender
+        # build its picking BVH, seconds the user spends staring at a dead
+        # viewport. The modal refreshes the preview on every mouse move and
+        # again on click before using it, so deferring costs nothing -- the
+        # build now happens under the first mouse move instead of the open.
         self.update_header(context)
         self.detect_hotkey()
         return True
@@ -896,9 +900,15 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.mouse_vector = view3d_utils.region_2d_to_vector_3d(
             region, region.data, self.mouse_position
         )
+        started = time.perf_counter()
         hit = self.raycast_lock_key_surface(
             context, selected_only=self.current_state == State.IDLE
         )
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.25:
+            logger.warning(
+                f"Lock and key: hover raycast took {elapsed:.2f}s -- first"
+                " contact with a dense part builds its picking structure once")
         if self.current_state == State.IDLE:
             self.lock_key_source_preview = hit
         else:
@@ -1815,8 +1825,12 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         self.update_mouse_position(context, event)
+        started = time.perf_counter()
         if not self.initialize(context):
             return {'CANCELLED'}
+        elapsed = time.perf_counter() - started
+        if elapsed > 0.25:
+            logger.warning(f"QuickSnap: opening took {elapsed:.2f}s")
 
         context.window.cursor_modal_set("DEFAULT")
 
