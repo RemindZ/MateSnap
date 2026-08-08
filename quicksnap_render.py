@@ -744,8 +744,20 @@ def draw_callback_3d(self, context):
                 depth_test=False,
             )
         if self.lock_key_target_preview is not None:
+            preview = self.lock_key_target_preview
+            location = preview['location']
+            # The mate anchors at the wall's centre when pick centring is on, so
+            # once that point is known the dot must not lie about it.
+            centred = getattr(self, 'lock_key_target_centred', None)
+            if (
+                centred is not None
+                and centred['location'] is not None
+                and centred['object_name'] == preview['object_name']
+                and centred['face_index'] == preview['face_index']
+            ):
+                location = centred['location']
             draw_points_3d(
-                [self.lock_key_target_preview['location']],
+                [location],
                 color=(1, 0.5, 0, 1),
                 point_width=5,
                 depth_test=False,

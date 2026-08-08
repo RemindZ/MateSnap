@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.18
+
+### Fixed
+- **The target preview dot shows where the mate will actually anchor.** With
+  pick centring on, both clicks anchor at the middle of their walls -- but the
+  hover dot was drawn at the raw hit under the cursor, so the shown point and
+  the used point disagreed. Once the cursor rests for a fifth of a second the
+  dot now slides to the hovered wall's centre. It is computed at rest rather
+  than per move, so sweeping never stalls, and the extraction it needs is the
+  same one the click would pay -- aiming now pre-pays the click.
+
 ## 1.8.17
 
 ### Fixed

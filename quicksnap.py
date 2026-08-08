@@ -163,7 +163,9 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = None
         self.lock_key_source_preview = None
         self.lock_key_target_preview = None
+        self.lock_key_target_centred = None
         self.lock_key_moving = None
+        self._lock_key_moved_at = time.perf_counter()
         self._lock_key_bvh_cache = {}
         self._lock_key_mesh_cache = {}
         self._lock_key_patch_cache = {}
@@ -987,6 +989,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             'geometry_signature': signature,
         }
         self.lock_key_target_preview = None
+        self.lock_key_target_centred = None
 
     def apply_world_delta_to_selection(self, delta):
         objects = [
@@ -997,6 +1000,49 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         )
         for obj in roots:
             obj.matrix_world = delta @ obj.matrix_world
+
+    def centre_lock_key_preview(self, context):
+        """Slide the target preview dot to the middle of the wall it hovers.
+
+        With pick centring on, the mate will anchor there -- the dot must not
+        lie about it. Computed once the cursor rests rather than per move, so
+        sweeping stays cheap and the first wall on a dense part pays its
+        extraction here, during aiming, instead of under the click.
+        """
+        preview = self.lock_key_target_preview
+        if (
+            preview is None
+            or not getattr(self.settings, 'lock_and_key_centre_picks', True)
+            or time.perf_counter() - self._lock_key_moved_at < 0.2
+        ):
+            return
+        centred = self.lock_key_target_centred
+        if (
+            centred is not None
+            and centred['object_name'] == preview['object_name']
+            and centred['face_index'] == preview['face_index']
+        ):
+            return
+        while True:
+            try:
+                centre = quicksnap_utils.clicked_patch_centre(
+                    self.lock_key_mesh_data(
+                        context, preview['object_name'], preview['location']
+                    ),
+                    preview['face_index'],
+                )
+                break
+            except quicksnap_utils.LockKeyRegionTooSmall as region:
+                region.provider.widen()
+        # A None centre is remembered too: the raw dot is already honest there,
+        # and forgetting that would recompute it every timer tick.
+        self.lock_key_target_centred = {
+            'object_name': preview['object_name'],
+            'face_index': int(preview['face_index']),
+            'location': centre,
+        }
+        if context.area is not None:
+            context.area.tag_redraw()
 
     def solve_lock_key(self, context, source, hit):
         """One full mate attempt ladder for finish_lock_key.
@@ -1157,6 +1203,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = None
         self.lock_key_source_preview = None
         self.lock_key_target_preview = None
+        self.lock_key_target_centred = None
 
 
     def apply(self, context, region, use_auto_merge=False):
@@ -1239,7 +1286,9 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = None
         self.lock_key_source_preview = None
         self.lock_key_target_preview = None
+        self.lock_key_target_centred = None
         self.lock_key_moving = None
+        self._lock_key_moved_at = time.perf_counter()
         self._lock_key_bvh_cache = {}
         self._lock_key_mesh_cache = {}
         self._lock_key_patch_cache = {}
@@ -1372,9 +1421,12 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         if event.type == 'MOUSEMOVE':
+            self._lock_key_moved_at = time.perf_counter()
             self.update_mouse_position(context, event)
             self.update_lock_key_preview(context, region)
             self.update_header(context)
+        elif event.type == 'TIMER':
+            self.centre_lock_key_preview(context)
         elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             self.update_mouse_position(context, event)
             self.update_lock_key_preview(context, region)
@@ -1762,7 +1814,9 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.lock_key_source_hit = None
         self.lock_key_source_preview = None
         self.lock_key_target_preview = None
+        self.lock_key_target_centred = None
         self.lock_key_moving = None
+        self._lock_key_moved_at = time.perf_counter()
         self._lock_key_bvh_cache = {}
         self._lock_key_mesh_cache = {}
         self._lock_key_patch_cache = {}
