@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.3
+
+### Fixed
+- **Sculpt-dense fillets no longer swallow the connector walls they border.**
+  Patch growth only compared each face with its neighbour, so once a fillet
+  was tessellated finer than five degrees per face the crawl walked the whole
+  arc, failed the flatness gate, and returned nothing -- the fillet became an
+  impassable moat around the connector, and on denser sculpts the flat walls
+  themselves drowned in the failed component. This is why a rectangular
+  socket with generously rounded fillets reported "0 raw patches" at the
+  click. Growth is now bounded to five degrees of drift from the clicked
+  face's own normal, which never splits a flat wall (their normals wobble by
+  fractions of a degree) and turns a dense fillet into a dozen strip patches
+  at most -- stepping stones again. The search reach rises from ten hops to
+  thirty to pay for crossing them. Genuinely round connectors still refuse,
+  at every tessellation density, via the existing curve test.
+
 ## 2.0.2
 
 ### Fixed

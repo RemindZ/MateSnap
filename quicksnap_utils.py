@@ -652,6 +652,13 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
         separation = centers[neighbors] - centers[sources]
         keep = (
             (np.einsum('ij,ij->i', source_normals, neighbor_normals) >= cos_planar)
+            # Bounded against the seed, not only the previous face: pairwise
+            # steps admit unlimited cumulative drift, and on a sculpt-dense
+            # fillet (adjacent faces under 5 degrees apart) the crawl walks the
+            # whole arc, fails the global flatness gate, and takes the flat
+            # wall down with it. A flat wall's own normals wobble a fraction of
+            # a degree, so the seed bound never splits one.
+            & (neighbor_normals @ normals[int(seed_polygon)] >= cos_planar)
             & (np.abs(np.einsum('ij,ij->i', separation, source_normals)) <= tolerance)
             & (np.abs(np.einsum('ij,ij->i', separation, neighbor_normals)) <= tolerance)
         )
@@ -1192,7 +1199,12 @@ def trim_click_promotions(mesh_data, face_index):
 # A plain box peg reaches its far wall in two patch hops. Every chamfer or fillet
 # ring around an edge inserts another one, so a well-modelled connector puts its
 # opposite wall out of reach and the click looks like it landed on nothing at all.
-_CONNECTOR_MAX_HOPS = 10
+# Deep enough to cross two sculpt-dense fillets. Growth is bounded to 5 degrees
+# of drift from its seed, so a 90-degree fillet is at worst ~a dozen strip
+# patches however finely it is cut, and wall-to-opposite-wall runs two fillets
+# plus the faces between. Ten hops covered a modelled bevel of a few segments
+# but not a sculptor's rounding.
+_CONNECTOR_MAX_HOPS = 30
 # Hops are cheap to ask for and expensive to grow: each one pulls in a ring of new
 # patches, and growing a patch across a dense flat wall is the single most expensive
 # thing here. Bound the walk by how much it has already turned up rather than by

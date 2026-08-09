@@ -1424,9 +1424,18 @@ def assert_filleted_connectors_mate():
     ring inserts another, so a fixed two-hop neighbourhood never sees the opposite
     wall of a nicely modelled connector and the click looks like it landed on
     nothing. The search now widens when it finds no opposed pair at all.
+
+    The dense counts are the sculpted regime: once adjacent fillet faces differ
+    by under five degrees, an unbounded pairwise crawl walks the whole fillet,
+    fails the global flatness gate, and the fillet becomes an impassable moat --
+    or, denser still, the crawl crosses the wall boundary and the walls
+    themselves drown in the failed component (12 and 64 segments respectively,
+    on this fixture).
     """
     settings = SimpleNamespace(ignore_modifiers=True)
-    for segments, with_body in ((1, False), (3, False), (5, False), (3, True)):
+    for segments, with_body in (
+            (1, False), (3, False), (5, False), (3, True),
+            (12, False), (64, False)):
         clear_scene()
         key, key_face, key_hit, lock, lock_face, lock_hit = make_filleted_pair(
             segments, with_body=with_body
@@ -1772,20 +1781,28 @@ def assert_curvature_is_judged_at_the_click():
     if not pairs:
         raise AssertionError(f"a flat socket found no wall pair: {reason}")
 
-    # A genuinely round connector must still fail closed.
-    clear_scene()
-    bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=0.5, depth=2.0)
-    cylinder = bpy.context.active_object
-    side = min(
-        (p.index for p in cylinder.data.polygons if abs(p.normal.z) < 0.1),
-        key=lambda index: cylinder.data.polygons[index].center.x,
-    )
-    _, reason = pairs_at(
-        cylinder, side,
-        cylinder.matrix_world @ cylinder.data.polygons[side].center,
-    )
-    if not reason or "curved surface" not in reason:
-        raise AssertionError(f"a round connector was not refused: {reason!r}")
+    # A genuinely round connector must still fail closed. The dense counts are
+    # the regime the seed drift bound changed: under five degrees per facet the
+    # curve used to vanish into one failed growth, whereas bounded growth turns
+    # it into strip patches -- which must be caught as a curve, never paired.
+    for vertices in (32, 96, 192):
+        clear_scene()
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=vertices, radius=0.5, depth=2.0
+        )
+        cylinder = bpy.context.active_object
+        side = min(
+            (p.index for p in cylinder.data.polygons if abs(p.normal.z) < 0.1),
+            key=lambda index: cylinder.data.polygons[index].center.x,
+        )
+        _, reason = pairs_at(
+            cylinder, side,
+            cylinder.matrix_world @ cylinder.data.polygons[side].center,
+        )
+        if not reason or "curved surface" not in reason:
+            raise AssertionError(
+                f"a round connector ({vertices} verts) was not refused: {reason!r}"
+            )
 
 
 def assert_alignment_refusal_reports_how_far_off():
