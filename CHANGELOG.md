@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.0.7
+
+### Added
+- **Top-of-peg + floor-of-socket clicks now align the mate.** When neither
+  click lands on a connector side wall, the clicked faces themselves carry
+  the intent: rotation keeps only candidates that bring the clicked key face
+  to rest against the clicked lock face, which pins the insertion alignment
+  and discards every upside-down seating -- the job wall anchors do, done by
+  the faces. This is the natural kit gesture (both faces point at the other
+  part, so peg top, parting plane, floor and mouth rim all work), and it is
+  exactly what the field kept clicking while the solver demanded side walls.
+
+### Fixed
+- **"Choose the smallest equivalent rotation" now fires on real parts.** Two
+  seatings counted as equivalent only when byte-identical, which sculpted
+  geometry never is -- so a near-square peg's interchangeable spins were
+  refused as "several rotations fit differently" instead of letting the
+  user's rough placement choose. Equivalence is now measured: seatings whose
+  every mated wall plane matches within the flatness tolerance it was
+  measured at are interchangeable, and the smallest rotation wins. A
+  rectangular peg in a square socket still differs far beyond tolerance,
+  still refuses, and is still resolvable by clicking the two mating walls.
+
 ## 2.0.6
 
 ### Fixed

@@ -1130,6 +1130,29 @@ def clicked_patch_centre(mesh_data, face_index):
     return Vector(tuple(float(value) for value in patch['point']))
 
 
+def _clicked_face_normal(mesh_data, face_index):
+    """The clicked wall's plane normal, from the same mesh the solver reads.
+
+    The raycast normal is one face of sculpt noise, and promotion forwards it
+    unchanged when it moves the click to a different face; the patch normal is
+    area-averaged and recomputed for whichever face the solve actually uses.
+    """
+    if mesh_data is None:
+        return None
+    index = int(face_index)
+    if index < 0 or index >= len(mesh_data['polygon_normals']):
+        return None
+    try:
+        patch = _grow_planar_patch(mesh_data, index)
+    except LockKeyRegionTooSmall:
+        raise
+    except Exception:
+        return None
+    if patch is None:
+        return None
+    return np.array(patch['normal'], dtype=np.float64)
+
+
 # A mouth chamfer or lead-in is a narrow strip whose plane sits roughly midway
 # between the corner faces it replaced. A connector wall never reads this way:
 # it meets its neighbours near 90 degrees, and an angled wall someone modelled
@@ -1767,14 +1790,31 @@ def _prune_rotation_pairs(source_pairs, target_pairs, diagnostics=None):
     return sources, targets
 
 
+# How closely a candidate rotation must bring the clicked key face to face the
+# clicked lock face when the clicks, not anchors, carry the orientation intent.
+# Sculpted end faces and parting planes sit within a few degrees of square to
+# their connector; ten matches the taper tolerance used everywhere else.
+_CLICK_FACES_OPPOSED_COS = math.cos(math.radians(10.0))
+
+
 def _rotation_candidates(
-        source_pairs, target_pairs, allow_mixed_anchor=False, diagnostics=None):
+        source_pairs, target_pairs, allow_mixed_anchor=False, diagnostics=None,
+        click_normals=None):
     """Enumerate compatible source/target wall mappings.
 
     `allow_mixed_anchor` pairs a wall click against a floor click. That mapping is
     only safe when the caller also supplies the target face normal, because nothing
     else constrains the insertion axis and an end-for-end flip otherwise satisfies
     every lateral test. The two travel together deliberately.
+
+    `click_normals` is the (key, lock) pair of clicked-face plane normals. When
+    NEITHER click lands on a connector wall -- the natural kit gesture is the top
+    of the peg and the floor of the socket, and every such face points at the
+    other part -- the two faces themselves carry the orientation intent: only
+    rotations that bring them to rest facing each other are enumerated, which
+    pins the insertion alignment and discards every end-for-end flip, exactly
+    the job the anchors do for wall clicks. The remaining spin is settled
+    downstream by the smallest-rotation rule over equivalent seatings.
     """
     if len(source_pairs) < 2 or len(target_pairs) < 2:
         _note_lock_key_skip(
@@ -1797,7 +1837,15 @@ def _rotation_candidates(
         return []
     sources_anchored = any(pair['anchor_side'] for pair in source_pairs)
     targets_anchored = any(pair['anchor_side'] for pair in target_pairs)
-    if not sources_anchored:
+    # Judged after pruning: a click on the peg's end face anchors the tip/base
+    # pair of a plated part, but that pair can never drive this mate -- what
+    # matters is that no SURVIVING pair carries the click, so the faces
+    # themselves are the only orientation intent on offer.
+    face_to_face = (
+        not sources_anchored and not targets_anchored
+        and click_normals is not None
+    )
+    if not sources_anchored and not face_to_face:
         # Every mapping below requires an anchored key pair, so enumerating
         # without one only ever produces an empty list -- and the fallback
         # message then blames penetration for a mate that was never attempted.
@@ -1810,11 +1858,12 @@ def _rotation_candidates(
         else:
             _note_lock_key_skip(
                 diagnostics,
-                "rotation reads which wall each click lands on to decide which"
+                "rotation reads which face each click lands on to decide which"
                 " way to turn the key, and the key click did not land on one of"
-                " its connector's side walls (an end face or parting plane does"
-                " not name a wall) -- click flat on a side wall of the key's"
-                " connector, and on the lock wall it should rest against")
+                " its connector's side walls -- click flat on a side wall of"
+                " the key's connector and on the lock wall it should rest"
+                " against, or click the key's end face and the lock's floor"
+                " and the two faces will be brought to rest together")
         return []
     candidates = []
     # Combinations, not permutations: the target side already enumerates both
@@ -1862,7 +1911,9 @@ def _rotation_candidates(
                 else:
                     swap_options.append((False, True))
             else:
-                if not any(source['anchor_side'] for source in sources):
+                if not face_to_face and not any(
+                    source['anchor_side'] for source in sources
+                ):
                     continue
                 for swaps in itertools.product(*swap_options):
                     correspondences = []
@@ -1878,7 +1929,16 @@ def _rotation_candidates(
                             (source['high_patch']['normal'], -target_high['normal']),
                         ))
                     rotation = _fit_connector_rotation(correspondences)
-                    if rotation is None or any(
+                    if rotation is None:
+                        continue
+                    if face_to_face:
+                        source_click, target_click = click_normals
+                        if (
+                            float((rotation @ source_click) @ target_click)
+                            > -_CLICK_FACES_OPPOSED_COS
+                        ):
+                            continue
+                    if any(
                         np.allclose(
                             rotation, item['rotation'], atol=1e-8, rtol=0.0
                         )
@@ -1887,7 +1947,14 @@ def _rotation_candidates(
                         continue
                     candidates.append({'rotation': rotation})
     if not candidates:
-        if targets_anchored:
+        if face_to_face:
+            _note_lock_key_skip(
+                diagnostics,
+                "no rotation rests the clicked key face against the clicked"
+                " lock face with the connector walls fitting (width or taper)"
+                " -- if those are not the two faces that should touch, click"
+                " the two mating walls instead")
+        elif targets_anchored:
             _note_lock_key_skip(
                 diagnostics,
                 "the clicked key wall and the clicked lock wall cannot rest"
@@ -2086,25 +2153,51 @@ def _buries_key_behind_target(peg_pairs, peg_offset, face_point, face_normal):
 
 
 def _connector_placement_signature(matches, translation):
-    """Where a candidate actually leaves the mated walls, as a set of world planes.
+    """Where a candidate actually leaves the mated walls, as world planes.
 
     Two candidates are geometrically equivalent only when they seat the mated walls
     identically -- that is what makes a symmetric connector's alternative solutions
     interchangeable, and it is the only case where the design allows preferring the
-    smaller rotation. Anything else is a different seating and must fail closed.
+    smaller rotation. Each plane carries the tolerance it was measured at, because
+    "identically" is judged by _equivalent_seatings at that tolerance.
     """
     planes = []
     for match in matches:
         source = match['source']
         for name in ('low_patch', 'high_patch'):
             patch = source[name]
-            normal = patch['normal']
+            normal = np.array(patch['normal'], dtype=np.float64)
             point = patch['point'] + translation
-            planes.append(
-                tuple(np.round(normal, 6).tolist())
-                + (round(float(normal @ point), 6),)
-            )
-    return tuple(sorted(planes))
+            planes.append((
+                normal, float(normal @ point), float(match['tolerance']),
+            ))
+    return planes
+
+
+def _equivalent_seatings(first, second):
+    """True when two candidates seat the mated walls in the same planes,
+    to within the tolerance each plane is measured at.
+
+    Byte-exact plane equality decides this for ideal synthetic walls but never
+    for sculpted ones: a near-square peg's four spins differ in the fourth
+    decimal, far inside the flatness tolerance the planes were built with, so
+    exact comparison turned "choose the smallest equivalent rotation" into a
+    refusal on every real part. Seatings whose every wall plane has a
+    counterpart within tolerance are indistinguishable at the precision the
+    solver claims; a plane with no counterpart is a genuinely different
+    seating and stays ambiguous.
+    """
+    def covered(planes, others):
+        for normal, offset, tolerance in planes:
+            if not any(
+                float(normal @ other_normal) >= _FIT_COS_5
+                and abs(offset - other_offset) <= max(tolerance, other_tolerance)
+                for other_normal, other_offset, other_tolerance in others
+            ):
+                return False
+        return True
+
+    return covered(first, second) and covered(second, first)
 
 
 def _orientation_compatible_pairs(source_pairs, target_pairs):
@@ -2653,9 +2746,24 @@ def compute_lock_key_transform(
     valid = []
     allow_mixed_anchor = target_normal is not None
     explained = 0 if diagnostics is None else len(diagnostics)
+
+    def _click_normal(mesh_data, face_index, raycast_normal):
+        normal = _clicked_face_normal(mesh_data, face_index)
+        if normal is None and raycast_normal is not None:
+            normal = np.array(raycast_normal, dtype=np.float64)
+            length = float(np.linalg.norm(normal))
+            normal = normal / length if length > 1e-12 else None
+        return normal
+
+    source_click = _click_normal(source_data, source_face_index, source_normal)
+    target_click = _click_normal(target_data, target_face_index, target_normal)
+    click_normals = (
+        (source_click, target_click)
+        if source_click is not None and target_click is not None else None
+    )
     candidates = _rotation_candidates(
         source_pairs, target_pairs, allow_mixed_anchor=allow_mixed_anchor,
-        diagnostics=diagnostics,
+        diagnostics=diagnostics, click_normals=click_normals,
     )
     # Which gate discarded each candidate. A refusal that cannot say is the
     # bug class this log exists to prevent: an empty enumeration spent weeks
@@ -2743,10 +2851,13 @@ def compute_lock_key_transform(
                    f" {autopsy})" if autopsy else ""))
         return None
     # Smallest-angle ranking is only legitimate between candidates that seat the
-    # mated walls identically. Candidates that seat them differently are a genuine
-    # ambiguity, and preferring the nearer one would silently pick an orientation
-    # the geometry never justified.
-    if len({item[2] for item in valid}) > 1:
+    # mated walls identically within measurement tolerance. Candidates that seat
+    # them differently are a genuine ambiguity, and preferring the nearer one
+    # would silently pick an orientation the geometry never justified.
+    valid.sort(key=lambda item: item[0])
+    if any(
+        not _equivalent_seatings(valid[0][2], item[2]) for item in valid[1:]
+    ):
         _note_lock_key_skip(
             diagnostics,
             "several rotations fit differently; too ambiguous to choose --"
@@ -2754,7 +2865,6 @@ def compute_lock_key_transform(
             " the wall it should rest against, so the clicks decide the"
             " orientation")
         return None
-    valid.sort(key=lambda item: item[0])
     return valid[0][1]
 
 

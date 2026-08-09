@@ -880,6 +880,117 @@ def assert_rotation_follows_the_clicked_walls():
             f"end-face click refusal does not teach the gesture: {diagnostics}")
 
 
+def assert_end_face_clicks_align_the_mate():
+    """Spec (amended 2026-08-09, fourth): the clicked faces carry the intent.
+
+    The natural kit gesture is the top of the peg and the floor of the socket
+    -- both faces point at the other part, and neither names a wall. Rotation
+    now reads them directly: only rotations that bring the two clicked faces to
+    rest against each other are enumerated, and the remaining spin is settled
+    by the smallest rotation among seatings equivalent within measurement
+    tolerance (byte-exact equivalence never fires on sculpted geometry). A
+    connector whose alternative seatings genuinely differ still fails closed,
+    and wall clicks still resolve it by naming the mapping.
+    """
+    def world_normal(obj, face):
+        matrix = obj.matrix_world.to_3x3().inverted().transposed()
+        return (matrix @ obj.data.polygons[face].normal).normalized()
+
+    def boxed_key(half_width, half_height, depth, taper=0.0):
+        slope = math.tan(math.radians(taper))
+        tip_x, tip_y = half_width - depth * slope, half_height - depth * slope
+        return make_mesh(
+            "FaceKey",
+            [(-tip_x, -tip_y, -depth), (tip_x, -tip_y, -depth),
+             (tip_x, tip_y, -depth), (-tip_x, tip_y, -depth),
+             (-half_width, -half_height, 0.0), (half_width, -half_height, 0.0),
+             (half_width, half_height, 0.0), (-half_width, half_height, 0.0)],
+            [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
+             (2, 3, 7, 6), (3, 0, 4, 7)],
+        )
+
+    def floored_lock(half_width, half_height, depth, taper=0.0):
+        slope = math.tan(math.radians(taper))
+        tip_x, tip_y = half_width - depth * slope, half_height - depth * slope
+        return make_mesh(
+            "FaceLock",
+            [(-half_width, -half_height, 0.0), (half_width, -half_height, 0.0),
+             (half_width, half_height, 0.0), (-half_width, half_height, 0.0),
+             (-tip_x, -tip_y, -depth), (tip_x, -tip_y, -depth),
+             (tip_x, tip_y, -depth), (-tip_x, tip_y, -depth)],
+            [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3),
+             (4, 5, 6, 7)],
+        )
+
+    def solve(key, key_face, key_hit, lock, lock_face, lock_hit, diagnostics=None):
+        return quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+            allow_rotation=True,
+            source_normal=world_normal(key, key_face),
+            target_normal=world_normal(lock, lock_face),
+            diagnostics=diagnostics,
+        )
+
+    # Near-square peg, top-of-peg and floor-of-socket clicks: the spin is
+    # ambiguous only at a precision the parts are not built to, so the
+    # smallest rotation (the user's rough placement) chooses -- straight, and
+    # drafted like the field kit whose flips must die at the matcher.
+    for label, taper in (("straight", 0.0), ("drafted", 7.0)):
+        clear_scene()
+        key = boxed_key(0.5, 0.498, 1.5, taper)
+        lock = floored_lock(0.6, 0.598, 1.2, taper)
+        key.location = (2.0, -1.0, 0.0)
+        key.rotation_euler = Euler((0.35, -0.25, 0.5), 'XYZ')
+        bpy.context.view_layer.update()
+        tip_hit = key.matrix_world @ Vector((0.0, 0.0, -1.5))
+        floor_hit = lock.matrix_world @ Vector((0.05, 0.1, -1.2))
+        delta = solve(key, 0, tip_hit, lock, 4, floor_hit)
+        if delta is None:
+            raise AssertionError(
+                f"{label}: top-of-peg and floor-of-socket clicks must mate")
+        key.matrix_world = delta @ key.matrix_world
+        if key.matrix_world.to_quaternion().angle > 1e-5:
+            raise AssertionError(f"{label}: the smallest spin was not chosen")
+        center = key.matrix_world.translation
+        if abs(center.x) > 1e-5 or abs(center.y) > 1e-5:
+            raise AssertionError(f"{label}: key was not centred: {tuple(center)}")
+        if abs(center.z - 0.3) > 1e-5:
+            raise AssertionError(
+                f"{label}: clicked faces do not rest together: z={center.z}")
+
+    # A rectangular peg in a square socket fits two genuinely different ways.
+    # End-face clicks cannot decide that and must fail closed... (depth 1.4 so
+    # the tip/base pair cannot fit the 1.0 opening: a snug-fitting depth pair
+    # would anchor the tip click and re-enter the pinned path sideways)
+    clear_scene()
+    key = boxed_key(0.45, 0.25, 1.4)
+    lock = floored_lock(0.5, 0.5, 1.2)
+    key.location = (2.0, -1.0, 0.0)
+    key.rotation_euler = Euler((0.35, -0.25, 0.5), 'XYZ')
+    bpy.context.view_layer.update()
+    tip_hit = key.matrix_world @ Vector((0.0, 0.0, -1.4))
+    floor_hit = lock.matrix_world @ Vector((0.0, 0.1, -1.2))
+    diagnostics = []
+    delta = solve(key, 0, tip_hit, lock, 4, floor_hit, diagnostics)
+    if delta is not None:
+        raise AssertionError(
+            "a rectangular peg in a square socket must not guess its seating")
+    if not any("several rotations fit differently" in note for note in diagnostics):
+        raise AssertionError(
+            f"ambiguous seating refusal is not named: {diagnostics}")
+
+    # ...and wall clicks resolve exactly that ambiguity by naming the mapping.
+    key_hit = key.matrix_world @ Vector((-0.45, 0.0, -0.3))
+    lock_hit = lock.matrix_world @ Vector((-0.5, 0.1, -0.5))
+    delta = solve(key, 5, key_hit, lock, 3, lock_hit)
+    if delta is None:
+        raise AssertionError("wall clicks must resolve the square-socket tie")
+    key.matrix_world = delta @ key.matrix_world
+    if key.matrix_world.to_quaternion().angle > 1e-5:
+        raise AssertionError("wall clicks seated the rectangle the wrong way")
+
+
 def assert_smallest_equivalent_rotation():
     clear_scene()
     key, key_face, key_hit, lock, lock_face, lock_hit = make_rotated_key_lock(
@@ -2528,6 +2639,7 @@ def main():
     assert compute_case(make_singular_key_lock) is None
     assert_smallest_equivalent_rotation()
     assert_rotation_follows_the_clicked_walls()
+    assert_end_face_clicks_align_the_mate()
     print("optional rotation: PASS")
     assert_modifier_path_is_consistent()
     print("raw/evaluated picking path: PASS")
