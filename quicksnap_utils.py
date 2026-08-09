@@ -687,7 +687,10 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
             extent = float(np.linalg.norm(coordinates.max(axis=0) - coordinates.min(axis=0)))
             tolerance = max(0.005 * extent, _FIT_ABS_TOL)
             residual = float(np.max(np.abs((mesh_data['polygon_centers'][polygon_indices] - point) @ normal)))
-            failure.update(extent=extent, residual=residual, tolerance=tolerance)
+            failure.update(
+                extent=extent, residual=residual, tolerance=tolerance,
+                centre=point,
+            )
             if extent > 0 and residual <= tolerance:
                 # An edge is boundary when any polygon it carries fell outside the
                 # component; edges owned by the mesh border alone never qualify,
@@ -1528,6 +1531,19 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label='key')
             "the wall may be fragmented rather than flat -- try Ignore modifiers, or"
             " merge coplanar faces on the connector"
         )
+    curves = [
+        failure for failure in _curved_growths(mesh_data, anchor)
+        if float(np.linalg.norm(failure['centre'] - anchor))
+        <= float(clicked['extent'])
+    ]
+    if curves:
+        rounded = max(curves, key=lambda item: item['faces'])
+        parts.append(
+            f"flat growth failed on {len(curves)} curved region(s) beside the"
+            f" click, the biggest {rounded['faces']} faces spanning"
+            f" {rounded['extent']:.4g} -- if that curve is the connector, it is"
+            " rounded, and rounded connectors are not supported"
+        )
     return ", ".join(parts)
 
 
@@ -2051,6 +2067,16 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
         say(f"patch extraction failed: {error}")
         return lines
     say(f"at full depth: {len(raw)} raw patches -> {len(walls)} merged walls")
+    curves = _curved_growths(mesh_data, anchor)
+    if curves:
+        say(f"failed (curved) flat growths recorded on this part: {len(curves)},"
+            " nearest first:")
+        for failure in curves[:3]:
+            say(f"    {failure['faces']} face(s) spanning {failure['extent']:.5f},"
+                f" bowed {failure['residual']:.5f} vs allowance"
+                f" {failure['tolerance']:.5f},"
+                f" centred {float(np.linalg.norm(failure['centre'] - anchor)):.5f}"
+                " from the anchor")
     if clicked is None:
         say("the clicked face did not land in any merged wall")
         failure = mesh_data.get('patch_failures', {}).get(index)
@@ -2128,12 +2154,15 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
         except Exception as error:
             say(f"    hops {hop:>2}: failed: {error}")
             break
+        # Widest first: the question this trace answers is whether a
+        # straighter pair than the returned ones ever comes into reach, and
+        # ascending order buried it under the noise floor at 95.
         openings = sorted({
             round(math.degrees(item['opening_angle']), 1) for item in unfloored
-        })
+        }, reverse=True)
         say(f"    hops {hop:>2}: {len(reached):>3} walls, {len(unfloored):>3}"
             f" pairs, {_independent_axis_count(unfloored)} independent axes,"
-            f" openings {openings[:12]}")
+            f" openings (widest first) {openings[:12]}")
     if reason:
         say(f"refused: {reason}")
     return lines
@@ -2170,6 +2199,26 @@ def _pairs_share_an_axis(source_pairs, target_pairs):
         abs(float(source['axis'] @ target['axis'])) >= _FIT_COS_5
         for source in source_pairs
         for target in target_pairs
+    )
+
+
+def _curved_growths(mesh_data, anchor):
+    """Distinct failed flat growths with a measurable centre, nearest first.
+
+    A rounded connector never becomes a wall: its growth fails the flatness gate
+    and vanishes from every list a refusal prints, so the refusals around one
+    read as if the connector did not exist -- clicking its side says to click
+    flat, clicking the flat beside it says to click the side. These records are
+    the only trace the curve leaves.
+    """
+    anchor = np.array(anchor, dtype=np.float64)
+    distinct = {}
+    for failure in mesh_data.get('patch_failures', {}).values():
+        if failure.get('centre') is not None:
+            distinct[id(failure)] = failure
+    return sorted(
+        distinct.values(),
+        key=lambda item: float(np.linalg.norm(item['centre'] - anchor)),
     )
 
 
@@ -2219,12 +2268,31 @@ def _clicked_wall_is_not_a_connector(mesh_data, seeds, anchor, label, pairs=()):
     # out of reach -- and the reach message says that better than this one would.
     if biggest <= 0.0 or biggest >= _CONNECTOR_MIN_FACING_FRACTION * area:
         return None
+    # Telling the user to click the connector instead is circular when the
+    # connector beside this face is rounded: its side refuses with "click flat".
+    # Only the failed growths know the curve is there at all.
+    anchor = np.array(anchor, dtype=np.float64)
+    curves = [
+        failure for failure in _curved_growths(mesh_data, anchor)
+        if float(np.linalg.norm(failure['centre'] - anchor))
+        <= float(clicked['extent'])
+    ]
+    hint = (
+        ". On a split part, click the side of the peg or the inner wall of the"
+        " socket, not the flat face they sit on"
+    )
+    if curves:
+        rounded = max(curves, key=lambda item: item['faces'])
+        hint = (
+            f". Beside it, flat growth failed on {len(curves)} curved region(s),"
+            f" the biggest {rounded['faces']} faces spanning"
+            f" {rounded['extent']:.4g} -- if that curve is the connector, it is"
+            " rounded, and rounded connectors are not supported"
+        )
     return (
         f"the {label} click is on a large flat face rather than a connector -- the"
         f" wall you clicked measures {area:.4g} and the biggest wall facing it"
-        f" measures {biggest:.4g}, so there is nothing here to mate into. On a"
-        " split part, click the side of the peg or the inner wall of the socket,"
-        " not the flat face they sit on"
+        f" measures {biggest:.4g}, so there is nothing here to mate into" + hint
     )
 
 

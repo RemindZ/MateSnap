@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.2
+
+### Fixed
+- **A rounded connector is now named as the refusal, not talked around.** A
+  curved peg or socket never survives flat-patch growth, so it was invisible
+  to every refusal: clicking its side said "click flat on a connector wall"
+  and clicking the flat face beside it said "click the side of the peg" --
+  circular advice with no exit. Failed growths now leave a record, and both
+  refusals report the curved region beside the click (faces, span) and say
+  plainly that rounded connectors are not supported. The diagnostic report
+  lists the nearest failed growths, and the widening trace prints openings
+  widest-first, since "does a straighter pair ever come into reach" is the
+  question it exists to answer.
+
 ## 2.0.1
 
 ### Fixed
