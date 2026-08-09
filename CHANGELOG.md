@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.0.6
+
+### Fixed
+- **Automatic rotation now follows the clicked walls.** Rotation enumerates
+  which key wall maps to which lock wall, and the licence that lets a wall
+  click pair with a floor click (which only the lock's own clicked-face
+  normal can make safe) was granted whenever that normal was available --
+  in the GUI, always. The enumeration was therefore free to ignore the
+  clicks even when both landed on walls, and on a near-square connector
+  (field case: a 13.5965 x 13.5958 peg) every 90-degree seating survived to
+  the ambiguity tie, so the mate was refused however the user clicked. Wall
+  clicks now pin the mapping: click a side wall of the key's connector and
+  the lock wall it should rest against, and those two walls mate.
+- **Rotation refusals name their cause.** "No rotation seats the key without
+  penetrating the lock" covered five different failure gates -- including
+  the field case where no candidate was ever enumerated because neither
+  click landed on a connector side wall (a peg's end face or a socket's
+  floor names no wall). That case now says to click a side wall; a clicked
+  wall that fits nothing, and two clicked walls that cannot mate each
+  other, say so; and the generic message now counts the candidates each
+  gate discarded. The rotation-off nudge and the ambiguity refusal teach
+  the same gesture.
+
 ## 2.0.5
 
 ### Fixed

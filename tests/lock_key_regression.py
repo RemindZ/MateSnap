@@ -790,6 +790,96 @@ def assert_rotated_alignment():
         raise AssertionError(f"rotation changed click-defined insertion depth: {center.z}")
 
 
+def assert_rotation_follows_the_clicked_walls():
+    """Spec (amended 2026-08-09, third): wall clicks pin the wall correspondence.
+
+    The GUI always passes both click normals, which enables the mixed wall/floor
+    mapping -- and that licence used to free the enumeration to ignore the
+    anchors even when BOTH clicks named a wall. On a near-square connector (a
+    sculpted kit peg is never exactly square) every 90-degree seating then
+    survived to the placement-signature tie and the mate was refused as
+    ambiguous, so rotation was unusable on square-ish kit connectors however
+    the user clicked. Field case: Cthulhu_Stand_Book_1 peg, 13.5965 x 13.5958.
+    """
+    def world_normal(obj, face):
+        matrix = obj.matrix_world.to_3x3().inverted().transposed()
+        return (matrix @ obj.data.polygons[face].normal).normalized()
+
+    # The drafted variant mirrors the field kit (opening ~166 degrees): its
+    # end-for-end flip candidate survives to the matcher and must die at the
+    # opposed-normals gate, not by the signature dedup that only straight
+    # synthetic walls can ever satisfy. Depth 1.5 keeps the box fixture honest:
+    # a kit peg's end face has nothing opposed and parallel, but a closed box's
+    # tip/base pair is a third connector the near-square lock would otherwise
+    # accept sideways.
+    for label, taper in (("straight", 0.0), ("drafted", 7.0)):
+        clear_scene()
+        key, key_face, key_hit, lock, lock_face, lock_hit = make_rotated_key_lock(
+            taper_degrees=taper, source_depth=1.5,
+            source_half_height=0.498, target_half_height=0.598,
+        )
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit,
+            allow_rotation=True,
+            source_normal=world_normal(key, key_face),
+            target_normal=world_normal(lock, lock_face),
+        )
+        if delta is None:
+            raise AssertionError(
+                f"{label}: wall clicks on a near-square connector must pin the"
+                " mapping and mate")
+        key.matrix_world = delta @ key.matrix_world
+        if key.matrix_world.to_quaternion().angle > 1e-5:
+            raise AssertionError(f"{label}: clicked walls were not mated upright")
+        center = key.matrix_world.translation
+        if abs(center.x) > 1e-5 or abs(center.y) > 1e-5:
+            raise AssertionError(f"{label}: key was not centred: {tuple(center)}")
+
+    # An end-face click names no wall, so rotation cannot know which way to turn
+    # the key. The refusal must teach the gesture rather than blame penetration
+    # for candidate rotations that were never enumerated. The key is an open
+    # shell like a kit peg on its part: the tip face has nothing opposed and
+    # parallel, so the click anchors no pair at all.
+    clear_scene()
+    key = make_mesh(
+        "TipClickKey",
+        [(-0.5, -0.498, -1.0), (0.5, -0.498, -1.0),
+         (0.5, 0.498, -1.0), (-0.5, 0.498, -1.0),
+         (-0.5, -0.498, 0.0), (0.5, -0.498, 0.0),
+         (0.5, 0.498, 0.0), (-0.5, 0.498, 0.0)],
+        [(0, 3, 2, 1), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)],
+    )
+    lock = make_mesh(
+        "TipClickLock",
+        [(-0.6, -0.598, 0.0), (0.6, -0.598, 0.0),
+         (0.6, 0.598, 0.0), (-0.6, 0.598, 0.0),
+         (-0.6, -0.598, -1.2), (0.6, -0.598, -1.2),
+         (0.6, 0.598, -1.2), (-0.6, 0.598, -1.2)],
+        [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3)],
+    )
+    key.location = (2.0, -1.0, 0.0)
+    key.rotation_euler = Euler((0.35, -0.25, 0.5), 'XYZ')
+    bpy.context.view_layer.update()
+    lock_face = 3
+    lock_hit = lock.matrix_world @ Vector((-0.6, 0.1, -0.5))
+    tip_hit = key.matrix_world @ Vector((0.0, 0.0, -1.0))
+    diagnostics = []
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, 0, tip_hit, lock.name, lock_face, lock_hit,
+        allow_rotation=True,
+        source_normal=world_normal(key, 0),
+        target_normal=world_normal(lock, lock_face),
+        diagnostics=diagnostics,
+    )
+    if delta is not None:
+        raise AssertionError("an end-face click must not guess an orientation")
+    if not any("side wall of the key's connector" in note for note in diagnostics):
+        raise AssertionError(
+            f"end-face click refusal does not teach the gesture: {diagnostics}")
+
+
 def assert_smallest_equivalent_rotation():
     clear_scene()
     key, key_face, key_hit, lock, lock_face, lock_hit = make_rotated_key_lock(
@@ -2437,6 +2527,7 @@ def main():
     ) is None
     assert compute_case(make_singular_key_lock) is None
     assert_smallest_equivalent_rotation()
+    assert_rotation_follows_the_clicked_walls()
     print("optional rotation: PASS")
     assert_modifier_path_is_consistent()
     print("raw/evaluated picking path: PASS")

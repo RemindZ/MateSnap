@@ -1783,6 +1783,7 @@ def _rotation_candidates(
             f" {len(source_pairs)} on the key / {len(target_pairs)} on the lock --"
             " click flat on a connector wall rather than a rim or a rounded face")
         return []
+    clicked_a_key_wall = any(pair['anchor_side'] for pair in source_pairs)
     pruned = _prune_rotation_pairs(source_pairs, target_pairs, diagnostics)
     if pruned is None:
         return []
@@ -1793,6 +1794,27 @@ def _rotation_candidates(
             "after discarding the wall pairs that can never fit, too few remain to"
             f" pin a rotation ({len(source_pairs)} key / {len(target_pairs)} lock)"
             " -- check that the two parts are the same scale")
+        return []
+    sources_anchored = any(pair['anchor_side'] for pair in source_pairs)
+    targets_anchored = any(pair['anchor_side'] for pair in target_pairs)
+    if not sources_anchored:
+        # Every mapping below requires an anchored key pair, so enumerating
+        # without one only ever produces an empty list -- and the fallback
+        # message then blames penetration for a mate that was never attempted.
+        if clicked_a_key_wall:
+            _note_lock_key_skip(
+                diagnostics,
+                "the clicked key wall fits none of the lock's walls (width or"
+                " taper) -- click the two walls that should rest against each"
+                " other, or check that the parts are the same scale")
+        else:
+            _note_lock_key_skip(
+                diagnostics,
+                "rotation reads which wall each click lands on to decide which"
+                " way to turn the key, and the key click did not land on one of"
+                " its connector's side walls (an end face or parting plane does"
+                " not name a wall) -- click flat on a side wall of the key's"
+                " connector, and on the lock wall it should rest against")
         return []
     candidates = []
     # Combinations, not permutations: the target side already enumerates both
@@ -1814,9 +1836,17 @@ def _rotation_candidates(
                     or clearance is None
                     or clearance < -tolerance
                     or (
-                        not allow_mixed_anchor
-                        and bool(source['anchor_side'])
+                        bool(source['anchor_side'])
                         != bool(target['anchor_side'])
+                        # Mixed pairing exists only for a floor click. When both
+                        # parts carry a wall click, the clicks name the wall
+                        # correspondence, and enumerating past them resurrects
+                        # the near-square ambiguity ("several rotations fit
+                        # differently") that anchoring exists to resolve.
+                        and (
+                            not allow_mixed_anchor
+                            or (sources_anchored and targets_anchored)
+                        )
                     )
                 ):
                     break
@@ -1856,6 +1886,19 @@ def _rotation_candidates(
                     ):
                         continue
                     candidates.append({'rotation': rotation})
+    if not candidates:
+        if targets_anchored:
+            _note_lock_key_skip(
+                diagnostics,
+                "the clicked key wall and the clicked lock wall cannot rest"
+                " against each other (width or taper mismatch) -- rotation"
+                " follows the clicked walls, so click the two walls that"
+                " should mate")
+        else:
+            _note_lock_key_skip(
+                diagnostics,
+                "no pairing of the key's walls onto the lock's walls fits"
+                " (width or taper)")
     return candidates
 
 
@@ -2547,7 +2590,9 @@ def compute_lock_key_transform(
                 _note_lock_key_skip(
                     diagnostics,
                     "the key is not aligned with the lock -- turn on 'Rotate key to"
-                    " match lock', or rotate the key roughly into place first"
+                    " match lock' and click a side wall of the key's connector plus"
+                    " the lock wall it should rest against, or rotate the key"
+                    " roughly into place first"
                     f" ({len(source_pairs)} key / {len(target_pairs)} lock wall"
                     f" pairs, none facing each other{nearest})")
             else:
@@ -2612,23 +2657,30 @@ def compute_lock_key_transform(
         source_pairs, target_pairs, allow_mixed_anchor=allow_mixed_anchor,
         diagnostics=diagnostics,
     )
+    # Which gate discarded each candidate. A refusal that cannot say is the
+    # bug class this log exists to prevent: an empty enumeration spent weeks
+    # in the field misreported as "penetrating the lock".
+    killed = {'unmatched': 0, 'uncentred': 0, 'one-axis': 0, 'insertion-guard': 0}
     for candidate in candidates:
         rotation = candidate['rotation']
         rotated_pairs = _rotate_connector_pairs(source_pairs, rotation)
         rotated_anchor = rotation @ source_anchor
         rotated_matches = _match_connector_pairs(rotated_pairs, target_pairs)
         if len(rotated_matches) < 2:
+            killed['unmatched'] += 1
             continue
         rotated_translation, rotated_used = _centreable_matches(
             rotated_matches, rotated_anchor, target_anchor
         )
         if rotated_translation is None or len(rotated_used) < 2:
+            killed['uncentred'] += 1
             continue
         # Rank the axes of the pairs that actually constrained the solve: a
         # rotation held by one balanced axis plus discarded extras is held by
         # one axis, however many pairs matched.
         axes = np.array([match['axis'] for match in rotated_used])
         if np.linalg.matrix_rank(axes, tol=math.sin(math.radians(5.0))) < 2:
+            killed['one-axis'] += 1
             continue
         # The insertion-axis guard reads the half-space off the socket's clicked
         # face, so which half is the socket decides which click it reads and which
@@ -2642,6 +2694,7 @@ def compute_lock_key_transform(
                 # Mixed anchors put the end-for-end flip back on the table, and only
                 # the socket's own click can discard it. Fail closed rather than seat
                 # a candidate that nothing constrained.
+                killed['insertion-guard'] += 1
                 continue
             buried = _buries_key_behind_target(
                 target_pairs, np.zeros(3),
@@ -2653,6 +2706,7 @@ def compute_lock_key_transform(
                 target_anchor, target_normal,
             )
         if buried:
+            killed['insertion-guard'] += 1
             continue
         rotation_matrix = mathutils.Matrix.Identity(4)
         for row in range(3):
@@ -2679,16 +2733,26 @@ def compute_lock_key_transform(
         # already said something more useful -- the caller surfaces the last note, so
         # appending here would bury "this connector has too many walls to search".
         if diagnostics is None or len(diagnostics) == explained:
+            autopsy = ", ".join(
+                f"{count} {gate}" for gate, count in killed.items() if count
+            )
             _note_lock_key_skip(
                 diagnostics,
-                "no rotation seats the key without penetrating the lock")
+                "no rotation seats the key without penetrating the lock"
+                + (f" ({len(candidates)} candidate rotation(s) discarded:"
+                   f" {autopsy})" if autopsy else ""))
         return None
     # Smallest-angle ranking is only legitimate between candidates that seat the
     # mated walls identically. Candidates that seat them differently are a genuine
     # ambiguity, and preferring the nearer one would silently pick an orientation
     # the geometry never justified.
     if len({item[2] for item in valid}) > 1:
-        _note_lock_key_skip(diagnostics, "several rotations fit differently; too ambiguous to choose")
+        _note_lock_key_skip(
+            diagnostics,
+            "several rotations fit differently; too ambiguous to choose --"
+            " click the key on a side wall of its connector and the lock on"
+            " the wall it should rest against, so the clicks decide the"
+            " orientation")
         return None
     valid.sort(key=lambda item: item[0])
     return valid[0][1]
