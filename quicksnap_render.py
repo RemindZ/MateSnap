@@ -469,7 +469,7 @@ def draw_perf_hud(self, context):
         return
     mode = "numpy (no KDTree)" if getattr(snapdata, "use_numpy_query", False) else "KDTree"
     lines = [
-        "QuickSnap perf",
+        "MateSnap perf",
         f"points: {getattr(snapdata, 'added_points_np', 0):,}",
         f"query mode: {mode}",
         f"query: {getattr(snapdata, 'last_query_ms', 0.0):.2f} ms",

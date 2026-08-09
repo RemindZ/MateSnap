@@ -4,16 +4,16 @@ import sys
 from . import addon_updater_ops
 
 bl_info = {
-    "name": "QuickSnap",
-    "author": "Julien Heijmans",
+    "name": "MateSnap",
+    "author": "RemindZ, based on QuickSnap by Julien Heijmans",
     "blender": (2, 93, 0),
-    'version': (1, 8, 18),
+    'version': (2, 0, 0),
     "category": "3D View",
-    "description": "Quickly snap objects/vertices/curve points",
+    "description": "Mate kit and figurine parts with precision snapping",
     "warning": "",
-    "doc_url": "https://github.com/JulienHeijmans/quicksnap",
-    "releases_url": "https://github.com/JulienHeijmans/quicksnap/releases",
-    "tracker_url": "https://github.com/JulienHeijmans/quicksnap/issues",
+    "doc_url": "https://github.com/RemindZ/MateSnap",
+    "releases_url": "https://github.com/RemindZ/MateSnap/releases",
+    "tracker_url": "https://github.com/RemindZ/MateSnap/issues",
 }
 
 

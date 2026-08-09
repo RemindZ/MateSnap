@@ -14,11 +14,11 @@ $version = '{0}.{1}.{2}' -f $versionMatch.Groups[1].Value,
     $versionMatch.Groups[2].Value,
     $versionMatch.Groups[3].Value
 $releaseDirectory = Join-Path $repoRoot 'releases'
-$archivePath = Join-Path $releaseDirectory ("QuickSnap-$version.zip")
+$archivePath = Join-Path $releaseDirectory ("MateSnap-$version.zip")
 $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
     'quicksnap-release-' + [guid]::NewGuid().ToString('N')
 )
-$addonRoot = Join-Path $stageRoot 'QuickSnap'
+$addonRoot = Join-Path $stageRoot 'MateSnap'
 
 $runtimeFiles = @(
     '__init__.py',
@@ -35,11 +35,11 @@ $runtimeFiles = @(
     'quicksnap_utils.py'
 )
 $requiredEntries = @(
-    'QuickSnap/__init__.py',
-    'QuickSnap/quicksnap.py',
-    'QuickSnap/quicksnap_utils.py',
-    'QuickSnap/quicksnap_snapdata.py',
-    'QuickSnap/icons/QUICKSNAP_POINTS.tif'
+    'MateSnap/__init__.py',
+    'MateSnap/quicksnap.py',
+    'MateSnap/quicksnap_utils.py',
+    'MateSnap/quicksnap_snapdata.py',
+    'MateSnap/icons/QUICKSNAP_POINTS.tif'
 )
 
 try {

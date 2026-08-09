@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.0
+
+### Changed
+- Renamed to MateSnap, formerly QuickSnap-High-Poly. The history below is
+  unchanged under the old name.
+
 ## 1.8.18
 
 ### Fixed

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Blender addon (legacy `bl_info` style, **not** an extension `blender_manifest.toml`), supporting Blender 2.93+. This repo is the **High-Poly fork** of [JulienHeijmans/quicksnap](https://github.com/JulienHeijmans/quicksnap): upstream's snapping behaviour plus optimizations for dense scenes and figurine-kit assembly features (post-snap precision fit, Lock and key).
+MateSnap is a Blender addon (legacy `bl_info` style, **not** an extension `blender_manifest.toml`), supporting Blender 2.93+. This repo is the **High-Poly fork** of [JulienHeijmans/quicksnap](https://github.com/JulienHeijmans/quicksnap): upstream's snapping behaviour plus optimizations for dense scenes and figurine-kit assembly features (post-snap precision fit, Lock and key).
 
 ## Commands
 
@@ -13,7 +13,7 @@ A Blender addon (legacy `bl_info` style, **not** an extension `blender_manifest.
 blender -b --factory-startup --python tests/lock_key_regression.py
 blender -b --factory-startup --python tests/precision_fit_regression.py
 
-# Build a release zip -> releases/QuickSnap-<bl_info version>.zip
+# Build a release zip -> releases/MateSnap-<bl_info version>.zip
 powershell -NoProfile -ExecutionPolicy Bypass -File ./build_release.ps1
 ```
 
@@ -67,7 +67,7 @@ The suites are unusual because Blender's background mode is restricted:
 
 ## Diagnosing user reports
 
-This addon ships publicly and users' models are often proprietary, so **a failure must be diagnosable from the addon's own log output** — never ask for a `.blend` or hand the user a script to run. `lock_key_diagnostic_report` in `quicksnap_utils.py` is the pattern: it runs only on the refusal path and dumps patches reached, walls recovered, facing counts, separations, and surviving pairs. Extend it rather than adding another one-line message. Needing the file means the logging is incomplete.
+This addon ships publicly and users' models are often proprietary, so **a failure must be diagnosable from the addon's own log output** — never ask for a `.blend` or hand the user a script to run. `lock_key_diagnostic_report` in `quicksnap_utils.py` is the pattern: it runs only on the refusal path and dumps patches reached, walls recovered, facing counts, separations, and surviving pairs. Extend it rather than adding another one-line message. The refusal log is `matesnap_lock_key_log.txt`; needing the file means the logging is incomplete.
 
 ## Conventions
 

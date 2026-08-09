@@ -30,8 +30,8 @@ LOCK_KEY_RAY_EPSILON = 1e-4
 
 
 class QuickVertexSnapOperator(bpy.types.Operator):
-    bl_idname = "object.quicksnap"
-    bl_label = "QuickSnap Tool"
+    bl_idname = "object.matesnap"
+    bl_label = "MateSnap Tool"
     bl_options = { 'REGISTER', 'UNDO'}
     bl_description = "Quickly snap selection from/to a selected vertex, curve point, object origin, edge midpoint, face" \
                      " center.\nUse the same keymap to open the tool PIE menu."
@@ -53,14 +53,14 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             logger.setLevel(logging.NOTSET)
         elif self.settings.log_level == 1:
             logger.setLevel(logging.INFO)
-            logger.info("QuickSnap: Setting logger level to: INFO")
+            logger.info("MateSnap: Setting logger level to: INFO")
             self.report({'INFO'},
-                        f"QuickSnap: Setting logger level to: INFO. Use Ctrl+Shift+TAB to change debug level.")
+                        f"MateSnap: Setting logger level to: INFO. Use Ctrl+Shift+TAB to change debug level.")
         if self.settings.log_level == 2:
             logger.setLevel(logging.DEBUG)
-            logger.debug("QuickSnap: Setting logger level to: DEBUG")
+            logger.debug("MateSnap: Setting logger level to: DEBUG")
             self.report({'INFO'},
-                        f"QuickSnap: Setting logger level to: DEBUG. Use Ctrl+Shift+TAB to change debug level.")
+                        f"MateSnap: Setting logger level to: DEBUG. Use Ctrl+Shift+TAB to change debug level.")
 
         #icons time
         self.icon_display_time = time.time()
@@ -141,7 +141,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.clickdrag = True
         self.last_event = None
         self.clicktime = 0
-        context.area.header_text_set(f"QuickSnap: Pick a vertex/point from the selection to start move-snapping")
+        context.area.header_text_set(f"MateSnap: Pick a vertex/point from the selection to start move-snapping")
         self.detect_hotkey()
         return True
 
@@ -384,7 +384,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         bpy.ops.transform.translate(value=fit, orient_type='GLOBAL', snap=False,
                                     use_automerge_and_split=False)
         logger.info(f"Precision fit: corrected by {fit.length:.6f}")
-        self.report({'INFO'}, f"QuickSnap precision fit: {fit.length:.4f}")
+        self.report({'INFO'}, f"MateSnap precision fit: {fit.length:.4f}")
 
     def revert_data(self, context, apply=False):
         """
@@ -1193,7 +1193,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             folder = os.path.dirname(blend) if blend else bpy.app.tempdir
             if not folder or not os.path.isdir(folder):
                 return None
-            return os.path.join(folder, "quicksnap_lock_key_log.txt")
+            return os.path.join(folder, "matesnap_lock_key_log.txt")
         except Exception:
             return None
 
@@ -1375,7 +1375,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             and event.alt == self.hotkey_alt
         ):
             self.menu_open = True
-            bpy.ops.wm.call_menu_pie(name="VIEW3D_MT_PIE_quicksnap")
+            bpy.ops.wm.call_menu_pie(name="VIEW3D_MT_PIE_matesnap")
             return {'RUNNING_MODAL'}
         if self.menu_open:
             self.menu_open = False
@@ -1628,7 +1628,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 and event.ctrl == self.hotkey_ctrl and event.alt == self.hotkey_alt and self.current_state == State.IDLE:
             self.menu_open = True
             logger.info(f"Pie menu called.")
-            bpy.ops.wm.call_menu_pie(name="VIEW3D_MT_PIE_quicksnap")
+            bpy.ops.wm.call_menu_pie(name="VIEW3D_MT_PIE_matesnap")
         elif event_type == 'ONE' or event_type == 'NUMPAD_1':
             self.icon_display_time = time.time()
             if self.current_state == State.IDLE:
@@ -1729,23 +1729,23 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             if loglevel == logging.NOTSET:
                 self.settings.log_level = 1
                 logger.setLevel(logging.INFO)
-                logger.info("QuickSnap: Setting logger level to: INFO.")
-                logger.info("Use Ctrl+Shift+TAB when QuickSnap is enabled to change debug level.")
+                logger.info("MateSnap: Setting logger level to: INFO.")
+                logger.info("Use Ctrl+Shift+TAB when MateSnap is enabled to change debug level.")
                 self.report({'INFO'},
-                            f"QuickSnap: Setting logger level to: INFO.\nUse Ctrl+Shift+TAB when QuickSnap is enabled to change debug level.")
+                            f"MateSnap: Setting logger level to: INFO.\nUse Ctrl+Shift+TAB when MateSnap is enabled to change debug level.")
             elif loglevel == logging.INFO:
                 self.settings.log_level = 2
                 logger.setLevel(logging.DEBUG)
-                logger.debug("QuickSnap: Setting logger level to: DEBUG.")
-                logger.debug("Use Ctrl+Shift+TAB when QuickSnap is enabled to change debug level.")
+                logger.debug("MateSnap: Setting logger level to: DEBUG.")
+                logger.debug("Use Ctrl+Shift+TAB when MateSnap is enabled to change debug level.")
                 self.report({'INFO'},
-                            f"QuickSnap: Setting logger level to: DEBUG.\nUse Ctrl+Shift+TAB when QuickSnap is enabled to change debug level.")
+                            f"MateSnap: Setting logger level to: DEBUG.\nUse Ctrl+Shift+TAB when MateSnap is enabled to change debug level.")
             if loglevel == logging.DEBUG:
                 self.settings.log_level = 0
                 logger.setLevel(logging.NOTSET)
-                self.report({'INFO'}, f"QuickSnap: Disabling debug.")
-                self.report({'INFO'}, f"Use Ctrl+Shift+TAB when QuickSnap is enabled to change debug level.")
-                print("QuickSnap: Disabling debug. Use Ctrl+Shift+TAB when QuickSnap is enabled to change debug level.")
+                self.report({'INFO'}, f"MateSnap: Disabling debug.")
+                self.report({'INFO'}, f"Use Ctrl+Shift+TAB when MateSnap is enabled to change debug level.")
+                print("MateSnap: Disabling debug. Use Ctrl+Shift+TAB when MateSnap is enabled to change debug level.")
         self.update_header(context)
 
     @staticmethod
@@ -1864,11 +1864,11 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         if self.snap_paused:
             ignore_modifiers_msg = f"{ignore_modifiers_msg} [SNAPPING PAUSED (Shift held)]"
         if self.current_state == State.IDLE:
-            context.area.header_text_set(f"QuickSnap: Pick the source vertex/point. {snapping_msg}{axis_msg} "
+            context.area.header_text_set(f"MateSnap: Pick the source vertex/point. {snapping_msg}{axis_msg} "
                                          f"{ignore_modifiers_msg}")
         elif self.current_state == State.SOURCE_PICKED:
             context.area.header_text_set(
-                f"QuickSnap: Move the mouse over the target vertex/point. {snapping_msg}{axis_msg} "
+                f"MateSnap: Move the mouse over the target vertex/point. {snapping_msg}{axis_msg} "
                 f"{ignore_modifiers_msg}")
 
     def invoke(self, context, event):
@@ -1884,7 +1884,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             return {'CANCELLED'}
         elapsed = time.perf_counter() - started
         if elapsed > 0.25:
-            logger.warning(f"QuickSnap: opening took {elapsed:.2f}s")
+            logger.warning(f"MateSnap: opening took {elapsed:.2f}s")
 
         context.window.cursor_modal_set("DEFAULT")
 
@@ -1976,7 +1976,7 @@ class QuickVertexSnapPreference(bpy.types.AddonPreferences):
     draw_rubberband: bpy.props.BoolProperty(name="Draw Rubber Band", default=True)
     use_auto_merge: bpy.props.BoolProperty(
         name="Use vertices Auto-Merge in Edit mode",
-        description="With this option enabled, QuickSnap will use the Auto-Merge toggle visible in the top right corner"
+        description="With this option enabled, MateSnap will use the Auto-Merge toggle visible in the top right corner"
                     " of the viewport and automatically merge vertices if it is enabled.",
         default=True)
     snap_objects_origin: bpy.props.EnumProperty(
@@ -2220,10 +2220,10 @@ class QuickVertexSnapPreference(bpy.types.AddonPreferences):
                     quicksnap_keymap = active_key
                     quicksnap_utils.display_keymap(active_key, col)
         col.separator()
-        col.label(text="QuickSnap hotkeys:")
+        col.label(text="MateSnap hotkeys:")
         if quicksnap_keymap is not None:
             quicksnap_utils.insert_ui_hotkey(col, f'EVENT_{quicksnap_keymap.type}',
-                                             "Open PIE menu (Same keymap as the QuickSnap Tool)",
+                                             "Open PIE menu (Same keymap as the MateSnap Tool)",
                                              shift=quicksnap_keymap.shift,
                                              control=quicksnap_keymap.ctrl,
                                              alt=quicksnap_keymap.alt,
@@ -2248,9 +2248,9 @@ class QuickVertexSnapPreference(bpy.types.AddonPreferences):
 
 
 
-class VIEW3D_MT_PIE_quicksnap(bpy.types.Menu):
+class VIEW3D_MT_PIE_matesnap(bpy.types.Menu):
     # label is displayed at the center of the pie menu.
-    bl_label = "QuickSnap_Pie"
+    bl_label = "MateSnap_Pie"
 
     def draw(self, context):
         layout = self.layout
@@ -2271,16 +2271,16 @@ class VIEW3D_MT_PIE_quicksnap(bpy.types.Menu):
         lock_column = pie.column()
         lock_box = lock_column.box()
         lock_box.operator(
-            "quicksnap.toggle_lock_key",
+            "matesnap.toggle_lock_key",
             text="Lock and key",
             depress=settings.lock_and_key_mode,
         )
         pie.prop(settings, "ignore_modifiers")
-        pie.operator("quicksnap.open_settings")
+        pie.operator("matesnap.open_settings")
 
 
 class QUICKSNAP_OT_toggle_lock_key(bpy.types.Operator):
-    bl_idname = "quicksnap.toggle_lock_key"
+    bl_idname = "matesnap.toggle_lock_key"
     bl_label = "Lock and key"
     bl_description = "Use two surface clicks for both source and target"
     bl_options = {'REGISTER', 'INTERNAL'}
@@ -2294,24 +2294,24 @@ class QUICKSNAP_OT_toggle_lock_key(bpy.types.Operator):
 
 
 class QUICKSNAP_OT_OpenSettings(bpy.types.Operator):
-    bl_idname = "quicksnap.open_settings"
+    bl_idname = "matesnap.open_settings"
     bl_label = "Open Addon Settings"
     bl_options = {'REGISTER', 'INTERNAL'}
 
     def execute(self, context):
         bpy.ops.screen.userpref_show()
         bpy.context.preferences.active_section = 'ADDONS'
-        bpy.data.window_managers["WinMan"].addon_search = "QuickSnap"
+        bpy.data.window_managers["WinMan"].addon_search = "MateSnap"
         bpy.data.window_managers["WinMan"].addon_filter = 'All'
         return {"FINISHED"}
 
 
-class QUICKSNAP_PT_toolbar(bpy.types.Panel):
+class MATESNAP_PT_toolbar(bpy.types.Panel):
     """Quick access to the per-session workflow toggles, in the 3D view sidebar (N panel)."""
-    bl_label = "QuickSnap"
+    bl_label = "MateSnap"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "QuickSnap"
+    bl_category = "MateSnap"
 
     def draw(self, context):
         settings = get_addon_settings()
@@ -2340,8 +2340,8 @@ blender_classes = [
     QuickVertexSnapPreference,
     QUICKSNAP_OT_toggle_lock_key,
     QUICKSNAP_OT_OpenSettings,
-    QUICKSNAP_PT_toolbar,
-    VIEW3D_MT_PIE_quicksnap
+    MATESNAP_PT_toolbar,
+    VIEW3D_MT_PIE_matesnap
 ]
 
 
@@ -2350,7 +2350,10 @@ def settings_file_path():
     config_dir = bpy.utils.user_resource('CONFIG')
     if not config_dir:
         return None
-    return os.path.join(config_dir, "quicksnap_settings.json")
+    # MateSnap's own file: sharing quicksnap_settings.json with an installed
+    # QuickSnap would silently import its values and let either addon overwrite
+    # the other's backup -- the README promises separate settings instead.
+    return os.path.join(config_dir, "matesnap_settings.json")
 
 
 def save_settings():
@@ -2429,7 +2432,7 @@ def register():
     key_config = window_manager.keyconfigs.addon
     if key_config:
         export_category = key_config.keymaps.new('3D View', space_type='VIEW_3D', region_type='WINDOW', modal=False)
-        export_key = export_category.keymap_items.new("object.quicksnap", type='V', value='PRESS', shift=True,
+        export_key = export_category.keymap_items.new("object.matesnap", type='V', value='PRESS', shift=True,
                                                       ctrl=True)
         addon_keymaps.append((export_category, export_key))
 

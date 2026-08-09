@@ -28,7 +28,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 __name_addon__ = '.'.join(__name__.split('.')[:-1])
-__name_addon_display__ = "QuickSnap"
+__name_addon_display__ = "MateSnap"
 
 # Safely import the updater.
 # Prevents popups for users with invalid python installs e.g. missing libraries
@@ -75,7 +75,7 @@ except Exception as e:
 # not match and have errors. Must be all lowercase and no spaces! Should also
 # be unique among any other addons that could exist (using this updater code),
 # to avoid clashes in operator registration.
-updater.addon = "quicksnap"
+updater.addon = "matesnap"
 
 
 # -----------------------------------------------------------------------------
@@ -187,11 +187,11 @@ class AddonUpdaterInstallPopup(bpy.types.Operator):
             row.alignment='EXPAND'
             row.operator(
                 "wm.url_open", text="Read {} release notes".format(__name_addon_display__), icon='HELP',
-            ).url = "https://github.com/JulienHeijmans/quicksnap/releases"
+            ).url = "https://github.com/RemindZ/MateSnap/releases"
             row = col.row()
             row.alignment = 'CENTER'
             row.scale_y = 1.5
-            row.operator("quicksnap.open_settings",text="Disable auto-update in the QuickSnap add-on settings",
+            row.operator("matesnap.open_settings",text="Disable auto-update in the MateSnap add-on settings",
                          icon="TOOL_SETTINGS")
             col.label(text=" ")
             col.label(text="Choose 'Update Now' & press OK to install, ",
@@ -1120,7 +1120,7 @@ def update_settings_ui(self, context, element=None):
         col.operator(AddonUpdaterRestoreBackup.bl_idname, text=backup_text)
         col.operator(
             "wm.url_open", text="Read {} release notes".format(__name_addon_display__), icon='HELP',
-        ).url = "https://github.com/JulienHeijmans/quicksnap/releases"
+        ).url = "https://github.com/RemindZ/MateSnap/releases"
 
     row = box.row()
     row.scale_y = 0.7
@@ -1378,16 +1378,16 @@ def register(bl_info):
     updater.private_token = None  # "tokenstring"
 
     # Choose your own username, must match website (not needed for GitLab).
-    updater.user = "JulienHeijmans"
+    updater.user = "RemindZ"
 
     # Choose your own repository, must match git name for GitHUb and Bitbucket,
     # for GitLab use project ID (numbers only).
-    updater.repo = "quicksnap"
+    updater.repo = "MateSnap"
 
     # updater.addon = # define at top of module, MUST be done first
 
     # Website for manual addon download, optional but recommended to set.
-    updater.website = "https://github.com/JulienHeijmans/quicksnap/"
+    updater.website = "https://github.com/RemindZ/MateSnap"
 
     # Addon subfolder path.
     # "sample/path/to/addon"
