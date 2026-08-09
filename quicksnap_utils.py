@@ -2200,6 +2200,165 @@ def _equivalent_seatings(first, second):
     return covered(first, second) and covered(second, first)
 
 
+# Surroundings survey: how far around each click the parts are compared, as a
+# multiple of the widest matched pair, with hard caps bounding the work on
+# dense sculpts. A sample buried deeper than the penetration factor times the
+# seating's measurement tolerance is a physical impossibility, not sculpt
+# noise; the depth reached is logged on every survey so field reports can
+# judge the factor.
+_SURVEY_RADIUS_WIDTHS = 2.5
+_SURVEY_MAX_SAMPLES = 512
+_SURVEY_MAX_POLYGONS = 20000
+_SURVEY_PENETRATION_FACTOR = 4.0
+
+
+def _survey_ring(mesh_data, anchor, radius, cap):
+    """Polygon ids within radius of the anchor, nearest first.
+
+    Raises LockKeyRegionTooSmall when the region does not cover the sphere, so
+    the survey never reads cut-open data -- a truncated region would hide the
+    very material an impossible seating penetrates.
+    """
+    centers = mesh_data['polygon_centers']
+    member = mesh_data.get('region_member')
+    mask = (
+        np.ones(len(centers), dtype=bool) if member is None
+        else np.asarray(member, dtype=bool)
+    )
+    delta = centers - anchor
+    distances = np.einsum('ij,ij->i', delta, delta)
+    within = mask & (distances <= radius * radius)
+    boundary = mesh_data.get('region_boundary')
+    if boundary is not None and bool(np.any(within & boundary)):
+        raise LockKeyRegionTooSmall(mesh_data['region_provider'])
+    ids = np.nonzero(within)[0]
+    if len(ids) > cap:
+        ids = ids[np.argsort(distances[ids], kind='stable')[:cap]]
+    return ids
+
+
+def _survey_obstacle_tree(mesh_data, polygon_ids):
+    """A BVH of just the polygons near the target click, indices compacted."""
+    from mathutils.bvhtree import BVHTree
+    loop_vertices = mesh_data['loop_vertices']
+    loop_starts = mesh_data['loop_starts']
+    loop_totals = mesh_data['loop_totals']
+    corners = [
+        loop_vertices[loop_starts[index]:loop_starts[index] + loop_totals[index]]
+        for index in map(int, polygon_ids)
+    ]
+    if not corners:
+        return None
+    used = np.unique(np.concatenate(corners))
+    remap = np.full(int(used.max()) + 1, -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    vertices = [tuple(map(float, vertex)) for vertex in mesh_data['vertices'][used]]
+    polygons = [tuple(int(remap[corner]) for corner in face) for face in corners]
+    return BVHTree.FromPolygons(vertices, polygons)
+
+
+def _survey_point_inside(tree, point, direction, limit):
+    """Ray-parity containment: odd crossings along `direction` means inside.
+
+    Signed distance off the nearest face misreads open shells -- the back of a
+    socket wall claims the whole half-space behind it -- while parity reads a
+    thin shell's free side as outside and a block's interior as inside, and is
+    direction-independent on the closed manifolds real parts are.
+    """
+    origin = Vector(tuple(float(value) for value in point))
+    epsilon = 1e-4 * limit
+    remaining = limit
+    crossings = 0
+    for _ in range(64):
+        location, _normal, _index, distance = tree.ray_cast(
+            origin, direction, remaining
+        )
+        if location is None:
+            break
+        crossings += 1
+        advance = distance + epsilon
+        origin = location + direction * epsilon
+        remaining -= advance
+        if remaining <= 0.0:
+            break
+    return crossings % 2 == 1
+
+
+def _survey_equivalent_seatings(
+        source_data, target_data, source_anchor, target_anchor,
+        seatings, radius, tolerance, direction):
+    """Let the surroundings veto spin-equivalent seatings.
+
+    A square-ish connector fits several ways and its walls cannot say which
+    the sculptor meant -- but the parts around it can: under a wrong
+    quarter-turn the sculpted surfaces beside the key drive into the lock's
+    material, while the intended seating rests them together. Samples of the
+    key's surface near its click are tested against the lock's surface near
+    its click under each candidate, and a seating that buries a sample deeper
+    than the allowance is physically impossible and discarded.
+
+    This never creates a transform: every candidate comes from the connector
+    walls, enumerated and solved as ever. It iterates nothing and runs on a
+    bounded sample count -- a veto, not the ICP fallback the design forbids.
+    Connector samples score identically under equivalent seatings, so every
+    difference comes from the surroundings; when all seatings survive, the
+    surroundings had nothing to say and the smallest rotation keeps deciding.
+
+    Returns (kept_seatings, log_note); kept order preserves the caller's.
+    """
+    sample_ids = _survey_ring(
+        source_data, source_anchor, radius, _SURVEY_MAX_SAMPLES
+    )
+    obstacle_ids = _survey_ring(
+        target_data, target_anchor, radius, _SURVEY_MAX_POLYGONS
+    )
+    if not len(sample_ids) or not len(obstacle_ids):
+        return seatings, None
+    tree = _survey_obstacle_tree(target_data, obstacle_ids)
+    if tree is None:
+        return seatings, None
+    samples = source_data['polygon_centers'][sample_ids]
+    ray = Vector(tuple(float(value) for value in direction)).normalized()
+    allowance = _SURVEY_PENETRATION_FACTOR * tolerance
+    reach = 4.0 * radius
+    kept = []
+    deepest = 0.0
+    for seating in seatings:
+        matrix = np.array(seating[1], dtype=np.float64)
+        moved = samples @ matrix[:3, :3].T + matrix[:3, 3]
+        depth = 0.0
+        for point in moved:
+            near = tree.find_nearest(
+                Vector(tuple(float(value) for value in point)), radius
+            )
+            if near[0] is None or near[3] <= allowance:
+                # Nothing nearby, or too shallow to be a violation even if
+                # buried -- parity is only worth its ray casts past that.
+                continue
+            if _survey_point_inside(tree, point, ray, reach):
+                depth = max(depth, float(near[3]))
+                if depth > allowance:
+                    break
+        deepest = max(deepest, depth)
+        if depth <= allowance:
+            kept.append(seating)
+    if not kept:
+        # The surroundings reject everything: broad noisy contact, not
+        # information. Withdraw rather than turn a working mate into a refusal.
+        return seatings, (
+            f"surroundings overlap under all {len(seatings)} equivalent"
+            f" seatings (deepest {deepest:.4f} vs allowance {allowance:.4f});"
+            " keeping the nearest rotation")
+    note = None
+    if len(kept) < len(seatings):
+        note = (
+            f"{len(seatings)} seatings fit the connector equally; the"
+            f" surroundings rule out {len(seatings) - len(kept)} (deepest"
+            f" overlap {deepest:.4f} vs allowance {allowance:.4f}); keeping"
+            f" the nearest of the {len(kept)} possible")
+    return kept, note
+
+
 def _orientation_compatible_pairs(source_pairs, target_pairs):
     """Every wall pairing already facing the right way, ignoring size.
 
@@ -2835,6 +2994,8 @@ def compute_lock_key_transform(
                 _connector_placement_signature(
                     rotated_used, rotated_translation
                 ),
+                max(match['source']['width'] for match in rotated_used),
+                max(match['tolerance'] for match in rotated_used),
             ))
     if not valid:
         # Only fall back to the generic seating message when the enumeration has not
@@ -2865,6 +3026,18 @@ def compute_lock_key_transform(
             " the wall it should rest against, so the clicks decide the"
             " orientation")
         return None
+    if len(valid) > 1 and target_click is not None:
+        # The connector cannot tell equivalent seatings apart, but the parts
+        # around it usually can -- a wrong quarter-turn drives the sculpted
+        # surroundings into the other part's material.
+        valid, survey_note = _survey_equivalent_seatings(
+            source_data, target_data, source_anchor, target_anchor, valid,
+            _SURVEY_RADIUS_WIDTHS * max(item[3] for item in valid),
+            max(item[4] for item in valid),
+            target_click,
+        )
+        if survey_note:
+            logger.warning(f"Lock and key: {survey_note}")
     return valid[0][1]
 
 

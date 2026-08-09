@@ -991,6 +991,94 @@ def assert_end_face_clicks_align_the_mate():
         raise AssertionError("wall clicks seated the rectangle the wrong way")
 
 
+def assert_surroundings_pick_the_spin():
+    """Spec (amended 2026-08-10): the surroundings veto impossible spins.
+
+    A square-ish peg fits its socket four ways and the walls cannot say which
+    the sculptor meant; smallest-rotation follows the user's rough placement,
+    which is wrong whenever the part was left nearest a wrong quarter-turn.
+    The sculptor keys the intent into the parts around the connector: here the
+    key carries a fin beside its peg and the lock leaves one bay clear with
+    raised blocks at the other three positions, so every wrong quarter-turn
+    drives the fin into a block. With the key parked 170 degrees around, the
+    nearest seating is the wrong one -- the survey must override it.
+    """
+    def world_normal(obj, face):
+        matrix = obj.matrix_world.to_3x3().inverted().transposed()
+        return (matrix @ obj.data.polygons[face].normal).normalized()
+
+    clear_scene()
+    # Near-square peg (1.0 x 0.996), depth 1.4, plus a single-quad fin flag at
+    # +X. A boxed fin would form its own wall pairs and collide with the
+    # matcher's one-axis rule; a lone quad samples without pairing.
+    key = make_mesh(
+        "SpinKey",
+        [(-0.5, -0.498, -1.4), (0.5, -0.498, -1.4),
+         (0.5, 0.498, -1.4), (-0.5, 0.498, -1.4),
+         (-0.5, -0.498, 0.0), (0.5, -0.498, 0.0),
+         (0.5, 0.498, 0.0), (-0.5, 0.498, 0.0),
+         (1.15, -0.2, 0.0), (1.15, 0.2, 0.0),
+         (1.15, 0.2, 0.3), (1.15, -0.2, 0.3)],
+        [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
+         (2, 3, 7, 6), (3, 0, 4, 7), (8, 9, 10, 11)],
+    )
+
+    def box(centre_x, centre_y):
+        base = len(lock_vertices)
+        lock_vertices.extend([
+            (centre_x - 0.25, centre_y - 0.25, 0.0),
+            (centre_x + 0.25, centre_y - 0.25, 0.0),
+            (centre_x + 0.25, centre_y + 0.25, 0.0),
+            (centre_x - 0.25, centre_y + 0.25, 0.0),
+            (centre_x - 0.25, centre_y - 0.25, 0.3),
+            (centre_x + 0.25, centre_y - 0.25, 0.3),
+            (centre_x + 0.25, centre_y + 0.25, 0.3),
+            (centre_x - 0.25, centre_y + 0.25, 0.3),
+        ])
+        lock_faces.extend([
+            (base + 0, base + 1, base + 2, base + 3),
+            (base + 7, base + 6, base + 5, base + 4),
+            (base + 0, base + 4, base + 5, base + 1),
+            (base + 1, base + 5, base + 6, base + 2),
+            (base + 2, base + 6, base + 7, base + 3),
+            (base + 3, base + 7, base + 4, base + 0),
+        ])
+
+    lock_vertices = [
+        (-0.55, -0.548, 0.0), (0.55, -0.548, 0.0),
+        (0.55, 0.548, 0.0), (-0.55, 0.548, 0.0),
+        (-0.55, -0.548, -1.4), (0.55, -0.548, -1.4),
+        (0.55, 0.548, -1.4), (-0.55, 0.548, -1.4),
+    ]
+    lock_faces = [
+        (1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3), (4, 5, 6, 7),
+    ]
+    for blocked in ((-1.15, 0.0), (0.0, 1.15), (0.0, -1.15)):
+        box(*blocked)
+    lock = make_mesh("SpinLock", lock_vertices, lock_faces)
+
+    key.location = (2.0, -1.0, 0.0)
+    key.rotation_euler = Euler((0.0, 0.0, math.radians(170.0)), 'XYZ')
+    bpy.context.view_layer.update()
+    tip_hit = key.matrix_world @ Vector((0.0, 0.0, -1.4))
+    floor_hit = lock.matrix_world @ Vector((0.0, 0.05, -1.4))
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, 0, tip_hit, lock.name, 4, floor_hit,
+        allow_rotation=True,
+        source_normal=world_normal(key, 0),
+        target_normal=world_normal(lock, 4),
+    )
+    if delta is None:
+        raise AssertionError("the keyed spin fixture must mate")
+    key.matrix_world = delta @ key.matrix_world
+    angle = key.matrix_world.to_quaternion().angle
+    if angle > 1e-5:
+        raise AssertionError(
+            "the fin was seated onto a block: the mate is"
+            f" {math.degrees(angle):.1f} degrees off the keyed orientation")
+
+
 def assert_smallest_equivalent_rotation():
     clear_scene()
     key, key_face, key_hit, lock, lock_face, lock_hit = make_rotated_key_lock(
@@ -2640,6 +2728,7 @@ def main():
     assert_smallest_equivalent_rotation()
     assert_rotation_follows_the_clicked_walls()
     assert_end_face_clicks_align_the_mate()
+    assert_surroundings_pick_the_spin()
     print("optional rotation: PASS")
     assert_modifier_path_is_consistent()
     print("raw/evaluated picking path: PASS")

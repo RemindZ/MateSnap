@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.1.0
+
+### Added
+- **The surroundings now pick the spin.** A square-ish peg fits its socket
+  four ways and the connector walls cannot say which the sculptor meant, so
+  the mate followed however you had roughly placed the part -- right when
+  you had parked it within a quarter-turn, wrong otherwise. Rotation now
+  surveys the area beside the clicks: samples of the key's surface near its
+  click are tested against the lock's surface near its click under every
+  candidate seating, and any seating that drives the surroundings into the
+  other part's material is thrown out as physically impossible -- the fin
+  lands in its bay, not on the boss next to it. When the surroundings have
+  nothing to say (truly symmetric parts), the nearest rotation to your
+  placement still decides, exactly as before; the survey can veto seatings
+  but never refuse a mate. Every mate where the survey ruled something out
+  logs one line saying how many seatings were offered, how many the
+  surroundings eliminated, and how deep the worst overlap was.
+
 ## 2.0.7
 
 ### Added
