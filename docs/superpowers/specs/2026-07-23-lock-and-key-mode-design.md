@@ -144,6 +144,8 @@ T(target_hit + lateral_correction) * R * T(-source_hit)
 
 Apply it only to the selected root objects so child transforms are not doubled.
 
+Amended 2026-08-09 (second): the solve balances the largest mutually consistent subset of the matches, not necessarily all of them. A sculpted connector matches more pairs than a rigid translation has freedoms -- corner bevels, taper segments, near-parallel duplicates of a wall -- and their centres never agree to within flatness tolerance the way a symmetric test part's do; demanding every match centre at once refused honest kit parts on two kits in one day (four matched pairs each, axes agreeing to a degree). When the full set fails validation, pairs are re-admitted greedily in order of each pair's smaller wall -- a pair is only as reliable as its lesser wall, so a disagreement between a wall pair and a corner-bevel pair is the wall's to win, never an ambiguity between peers; a genuinely ambiguous same-rank alternative feature is already discarded by the matcher's tie rule. "Validate against the exact patch correspondences used to solve" below therefore reads: clearance imbalance must finish within tolerance for the pairs used to solve; every matched pair, used or excluded, must still hold non-negative clearance under the final translation -- an excluded pair left un-centred is designed clearance, an excluded pair driven into the material fails the mate. Rotation candidates rank their two-independent-axes requirement over the used subset, since a rotation held by one balanced axis plus discarded extras is held by one axis.
+
 ## Validation and failure behavior
 
 Validate against the exact patch correspondences used to solve:

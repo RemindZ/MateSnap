@@ -1960,6 +1960,55 @@ def _validate_lock_key_transform(matches, translation):
     return True
 
 
+def _centreable_matches(matches, source_hit, target_hit):
+    """A translation from the matches a rigid move can actually balance.
+
+    A sculpted connector offers more matched pairs than a translation has
+    freedoms -- corner bevels, taper segments, near-parallel duplicates of a
+    wall -- and their centres never agree to within flatness tolerance the way
+    a symmetric test part's do. Demanding every match centre at once refused
+    honest parts. When the full set fails, re-solve on the largest mutually
+    consistent pairs, ordered by each pair's smaller wall: a pair is only as
+    reliable as its lesser wall, so a disagreement between a wall pair and a
+    corner-bevel pair is the wall's to win, never an ambiguity between peers.
+    Excluded pairs still must not interpenetrate under the chosen translation,
+    so a genuine clash fails closed; left un-centred but clear, they are
+    designed clearance, not error.
+
+    Returns (translation, used_matches); (None, ()) when nothing balances.
+    """
+    if not matches:
+        return None, ()
+    translation = _solve_lock_key_translation(matches, source_hit, target_hit)
+    if translation is not None and _validate_lock_key_transform(matches, translation):
+        return translation, tuple(matches)
+    ranked = sorted(
+        matches,
+        key=lambda match: -min(
+            float(match['source']['low_patch']['area']),
+            float(match['source']['high_patch']['area']),
+        ),
+    )
+    kept = []
+    solution = None
+    for match in ranked:
+        candidate = kept + [match]
+        attempt = _solve_lock_key_translation(candidate, source_hit, target_hit)
+        if attempt is not None and _validate_lock_key_transform(candidate, attempt):
+            kept = candidate
+            solution = attempt
+    if solution is None:
+        return None, ()
+    for match in matches:
+        # Identity, not equality: these dicts hold numpy arrays.
+        if any(match is used for used in kept):
+            continue
+        low_gap, high_gap = _connector_gaps(match, solution)
+        if low_gap < -match['tolerance'] or high_gap < -match['tolerance']:
+            return None, ()
+    return solution, tuple(kept)
+
+
 def _buries_key_behind_target(peg_pairs, peg_offset, face_point, face_normal):
     """True when a candidate seats the peg behind the socket face that was clicked.
 
@@ -2442,8 +2491,8 @@ def compute_lock_key_transform(
         target_data, target_seeds, target_anchor, 'lock'
     )
     matches = _match_connector_pairs(source_pairs, target_pairs)
-    translation = _solve_lock_key_translation(matches, source_anchor, target_anchor)
-    if translation is not None and _validate_lock_key_transform(matches, translation):
+    translation, _used = _centreable_matches(matches, source_anchor, target_anchor)
+    if translation is not None:
         return mathutils.Matrix.Translation(
             Vector(tuple(float(value) for value in translation))
         )
@@ -2529,11 +2578,31 @@ def compute_lock_key_transform(
                 else ", or turn 'Centre picks' back on so both clicks move to"
                 " the middle of their walls"
             )
+            # Name which check refused each pair, under the full-set solve:
+            # "could not be centred" covers gap imbalance, interpenetration and
+            # the anchor relocation cap, and they call for different fixes.
+            details = []
+            full_translation = _solve_lock_key_translation(
+                matches, source_anchor, target_anchor
+            )
+            if full_translation is not None:
+                correction = full_translation - (target_anchor - source_anchor)
+                for match in matches:
+                    low_gap, high_gap = _connector_gaps(match, full_translation)
+                    tolerance = match['tolerance']
+                    along = abs(float(match['axis'] @ correction))
+                    cap = 0.25 * match['source']['width'] + tolerance
+                    details.append(
+                        f" [axis {tuple(round(float(v), 3) for v in match['axis'])}"
+                        f" gaps {low_gap:+.4f}/{high_gap:+.4f} tol {tolerance:.4f}"
+                        f" anchor-shift {along:.4f} cap {cap:.4f}]"
+                    )
             _note_lock_key_skip(
                 diagnostics,
                 f"{len(matches)} matched wall pair(s) could not be centred within"
                 " tolerance -- the two clicks may be too far apart, or enable"
-                f" 'Rotate key to match lock'{centring_hint}")
+                f" 'Rotate key to match lock'{centring_hint}"
+                + "".join(details))
         return None
 
     valid = []
@@ -2550,20 +2619,21 @@ def compute_lock_key_transform(
         rotated_matches = _match_connector_pairs(rotated_pairs, target_pairs)
         if len(rotated_matches) < 2:
             continue
-        axes = np.array([match['axis'] for match in rotated_matches])
-        if np.linalg.matrix_rank(axes, tol=math.sin(math.radians(5.0))) < 2:
-            continue
-        rotated_translation = _solve_lock_key_translation(
+        rotated_translation, rotated_used = _centreable_matches(
             rotated_matches, rotated_anchor, target_anchor
         )
-        if rotated_translation is None or not _validate_lock_key_transform(
-            rotated_matches, rotated_translation
-        ):
+        if rotated_translation is None or len(rotated_used) < 2:
+            continue
+        # Rank the axes of the pairs that actually constrained the solve: a
+        # rotation held by one balanced axis plus discarded extras is held by
+        # one axis, however many pairs matched.
+        axes = np.array([match['axis'] for match in rotated_used])
+        if np.linalg.matrix_rank(axes, tol=math.sin(math.radians(5.0))) < 2:
             continue
         # The insertion-axis guard reads the half-space off the socket's clicked
         # face, so which half is the socket decides which click it reads and which
         # pairs it tests. The matcher has already agreed on the roles by this point.
-        if _pair_is_female(rotated_matches[0]['source']):
+        if _pair_is_female(rotated_used[0]['source']):
             socket_normal = (
                 None if source_normal is None
                 else rotation @ np.array(source_normal, dtype=np.float64)
@@ -2601,7 +2671,7 @@ def compute_lock_key_transform(
             valid.append((
                 angle, delta,
                 _connector_placement_signature(
-                    rotated_matches, rotated_translation
+                    rotated_used, rotated_translation
                 ),
             ))
     if not valid:

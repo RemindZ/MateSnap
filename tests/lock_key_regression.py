@@ -996,6 +996,108 @@ def assert_refused_mode_switch_is_transactional():
             raise AssertionError(f"{label}: refused switch disturbed the modal state")
 
 
+def assert_extra_pairs_yield_to_the_walls():
+    """Centring solves on the walls; lesser pairs may sit un-centred but never clash.
+
+    A sculpted connector matches more pairs than a translation can balance --
+    corner bevels, taper segments, near-parallel duplicates -- and demanding
+    every match centre within flatness tolerance refused honest kit parts
+    (field logs 2026-08-09, Faye and Guts kits: 4 matched pairs, refused).
+    The consistent-subset solve must mate on the wall pairs when the extras
+    are merely un-centred, and still refuse when an excluded pair would
+    interpenetrate -- that backstop is what keeps the relaxation fail-closed.
+    """
+    counter = iter(range(1000))
+
+    def patch(normal, point, area):
+        normal = np.array(normal, dtype=np.float64)
+        return {
+            'normal': normal / np.linalg.norm(normal),
+            'point': np.array(point, dtype=np.float64),
+            'area': float(area),
+            'extent': 2.0,
+            'tolerance': 0.01,
+            'fit_tolerance': 0.002,
+            'id': next(counter),
+            'polygons': set(),
+        }
+
+    diagonal = np.array([1.0, 1.0, 0.0]) / math.sqrt(2.0)
+
+    def peg_patches():
+        return [
+            patch((1, 0, 0), (0.5, 0, 0), 10.0),
+            patch((-1, 0, 0), (-0.5, 0, 0), 10.0),
+            patch((0, 1, 0), (0, 0.5, 0), 10.0),
+            patch((0, -1, 0), (0, -0.5, 0), 10.0),
+            patch(diagonal, 0.75 * diagonal, 2.0),
+            patch(-diagonal, -0.75 * diagonal, 2.0),
+        ]
+
+    def socket_patches(centre, diagonal_half, diagonal_shift):
+        centre = np.array(centre, dtype=np.float64)
+        return [
+            patch((1, 0, 0), centre + (-0.56, 0, 0), 12.0),
+            patch((-1, 0, 0), centre + (0.56, 0, 0), 12.0),
+            patch((0, 1, 0), centre + (0, -0.56, 0), 12.0),
+            patch((0, -1, 0), centre + (0, 0.56, 0), 12.0),
+            patch(diagonal,
+                  centre + (diagonal_shift - diagonal_half) * diagonal, 2.4),
+            patch(-diagonal,
+                  centre + (diagonal_shift + diagonal_half) * diagonal, 2.4),
+        ]
+
+    source_anchor = np.zeros(3)
+    target_anchor = np.array([3.0, 0.0, 0.0])
+
+    def matches_for(diagonal_half, diagonal_shift):
+        source_pairs = quicksnap_utils._connector_side_pairs(
+            peg_patches(), source_anchor
+        )
+        target_pairs = quicksnap_utils._connector_side_pairs(
+            socket_patches(target_anchor, diagonal_half, diagonal_shift),
+            target_anchor,
+        )
+        return quicksnap_utils._match_connector_pairs(source_pairs, target_pairs)
+
+    # A loose diagonal pair whose centre disagrees with the walls by 0.3: the
+    # full set must fail (this is the field case), the subset must mate.
+    matches = matches_for(0.95, 0.15)
+    if len(matches) < 3:
+        raise AssertionError(f"fixture matched only {len(matches)} pairs")
+    full = quicksnap_utils._solve_lock_key_translation(
+        matches, source_anchor, target_anchor
+    )
+    if full is not None and quicksnap_utils._validate_lock_key_transform(matches, full):
+        raise AssertionError(
+            "the fixture is consistent; it does not exercise the subset solve"
+        )
+    translation, used = quicksnap_utils._centreable_matches(
+        matches, source_anchor, target_anchor
+    )
+    if translation is None:
+        raise AssertionError("an un-centred loose pair blocked an honest mate")
+    if float(np.linalg.norm(translation - target_anchor)) > 1e-6:
+        raise AssertionError(
+            f"the walls did not decide the seat: translation {translation}"
+        )
+    if len(used) >= len(matches):
+        raise AssertionError("no pair was excluded; the subset solve never ran")
+
+    # A snug diagonal pair the walls' seat would drive into the material must
+    # still refuse: exclusion may waive centring, never interpenetration.
+    matches = matches_for(0.76, 0.30)
+    if len(matches) < 3:
+        raise AssertionError(f"snug fixture matched only {len(matches)} pairs")
+    translation, _ = quicksnap_utils._centreable_matches(
+        matches, source_anchor, target_anchor
+    )
+    if translation is not None:
+        raise AssertionError(
+            "an excluded pair was left interpenetrating: fail-closed backstop lost"
+        )
+
+
 def assert_failures_report_a_specific_reason():
     """One generic message for eight causes leaves nothing to try differently."""
     cases = []
@@ -2388,6 +2490,8 @@ def main():
     print("mode switch: PASS")
     assert_refused_mode_switch_is_transactional()
     print("refused mode switch is transactional: PASS")
+    assert_extra_pairs_yield_to_the_walls()
+    print("extra pairs yield to the walls: PASS")
     assert_failures_report_a_specific_reason()
     print("specific failure reasons: PASS")
     assert_terminate_survives_empty_selection()

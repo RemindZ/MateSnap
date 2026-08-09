@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.5
+
+### Fixed
+- **A connector's extra wall pairs no longer veto its own mate.** A sculpted
+  connector matches more pairs than a rigid translation can balance -- corner
+  bevels, taper segments, near-parallel duplicates of a wall -- and the solver
+  demanded every one of them centre within flatness tolerance at once, which
+  refused honest parts on two kits ("4 matched wall pair(s) could not be
+  centred within tolerance"). Centring now solves on the largest mutually
+  consistent pairs, ordered by each pair's smaller wall, and pairs left out
+  may sit un-centred in their designed clearance -- but must still clear
+  their walls under the chosen seat, so a genuine clash still refuses. When
+  centring does refuse, the reason now lists every matched pair's gaps,
+  imbalance tolerance and anchor shift, so the log names which check refused
+  instead of one sentence covering three causes.
+
 ## 2.0.4
 
 ### Fixed
