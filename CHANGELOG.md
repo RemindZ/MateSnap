@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.4
+
+### Fixed
+- **Clicking key and lock on the same part no longer freezes Blender.** The
+  mistake now refuses instantly with its own message -- "a mate moves the
+  whole object, so it cannot mate with itself" -- instead of paying two full
+  extractions, a wall search that misread identical walls as a taper
+  mismatch, and a refusal report that surveyed the same dense part twice.
+  The report's widening trace was the bulk of the stall on any refusal, not
+  just this one: it re-ran an unbudgeted quadratic pairing at every radius,
+  including identical re-runs after the reach stopped growing. It now pairs
+  only the 40 largest walls per radius and ends at saturation, which cut a
+  19-second refusal on a 200-face test part to instant; dense sculpts gain
+  proportionally more.
+
 ## 2.0.3
 
 ### Fixed

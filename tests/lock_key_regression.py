@@ -1006,6 +1006,12 @@ def assert_failures_report_a_specific_reason():
                   lock.name, lock_face, lock_hit, "not a mesh object"))
     cases.append(("stale face", key.name, 10_000, key_hit,
                   lock.name, lock_face, lock_hit, "no longer exists"))
+    # Both clicks on one object froze the UI in the field: the solver refused
+    # only after two full extractions and a wall search, then misdescribed the
+    # mistake as a taper mismatch between identical walls, and the refusal
+    # report surveyed the same dense part twice.
+    cases.append(("same object", key.name, key_face, key_hit,
+                  key.name, key_face, key_hit, "cannot mate with itself"))
 
     reasons = {}
     for label, source_name, source_face, source_hit, \

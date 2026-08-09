@@ -2158,11 +2158,23 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
     # radius offering two independent axes -- walls listed "in reach" at full
     # depth can still be absent from them. This trace shows what was pairable at
     # each radius, so a pair that only exists beyond the stop is visible.
-    say("widening trace (unfloored pairs per radius):")
+    # Pairing is quadratic and this report runs on the refusal path of dense
+    # parts, so each radius pairs only the largest walls -- slivers are never
+    # the question the trace answers -- and the loop ends once the reach stops
+    # growing, since every later radius would repeat the same line.
+    say("widening trace (pairs among the 40 largest walls per radius):")
+    previous = None
     for hop in range(2, _CONNECTOR_MAX_HOPS + 1):
         try:
             reached, _clicked = _connector_walls(mesh_data, seeds, hop)
-            unfloored = _connector_side_pairs(reached, anchor)
+            if previous is not None and len(reached) == previous:
+                say(f"    hops {hop:>2}+: reach saturated at {previous} walls")
+                break
+            previous = len(reached)
+            largest = sorted(
+                reached, key=lambda item: -float(item['area'])
+            )[:40]
+            unfloored = _connector_side_pairs(largest, anchor)
         except Exception as error:
             say(f"    hops {hop:>2}: failed: {error}")
             break
@@ -2345,6 +2357,16 @@ def compute_lock_key_transform(
         or abs(target_obj.matrix_world.to_3x3().determinant()) <= 1e-12
     ):
         _note_lock_key_skip(diagnostics, "source or target has a flattened (singular) transform")
+        return None
+    if source_object_name == target_object_name:
+        # Cheap and first: the geometry downstream would refuse anyway, but only
+        # after paying two full extractions and a wall search whose refusal then
+        # misdescribes the mistake as a taper mismatch between identical walls.
+        _note_lock_key_skip(
+            diagnostics,
+            "both clicks are on the same object -- a mate moves the whole"
+            " object, so it cannot mate with itself. Click the key on the"
+            " moving part and the lock on the part it joins")
         return None
     depsgraph = context.evaluated_depsgraph_get()
     ignore_modifiers = getattr(settings, 'ignore_modifiers', False)

@@ -1158,7 +1158,14 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 f", centre picks: "
                 f"{getattr(self.settings, 'lock_and_key_centre_picks', True)}",
             ]
-            for hit, label in ((source, "KEY"), (target, "LOCK")):
+            # Same-object clicks are a click mistake, not a geometry puzzle:
+            # dumping two full wall surveys of one dense part stalls the UI for
+            # a report that could only restate the reason line.
+            same_object = (
+                source is not None and target is not None
+                and source['object_name'] == target['object_name']
+            )
+            for hit, label in () if same_object else ((source, "KEY"), (target, "LOCK")):
                 if hit is None:
                     lines.append(f"  {label}: no hit recorded")
                     continue
