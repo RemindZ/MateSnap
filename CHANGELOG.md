@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.1
+
+### Fixed
+- **Lock and key refusals on real kit parts are now diagnosable from the log
+  alone.** A click whose flat growth fails now reports what it grew -- faces
+  swallowed, span, and how far it bowed past the flatness allowance -- instead
+  of a bare "0 raw patches", and the refusal one-liner carries the same
+  numbers. The report also prints the anchor's distance from the clicked
+  face's centre, every opposed wall pair rather than the first six, and a
+  per-radius widening trace, so a pair that only exists beyond where the
+  search stopped is visible in the log.
+
 ## 2.0.0
 
 ### Changed

@@ -668,6 +668,10 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
     areas = _polygon_areas(mesh_data, polygon_indices)
     total_area = float(areas.sum())
     patch = None
+    # A failed growth is invisible in the refusal log -- "0 raw patches" cannot
+    # say whether the click was on a curve, a sliver, or the wrong mesh -- so
+    # keep its measurements for lock_key_diagnostic_report.
+    failure = {'faces': len(component), 'area': total_area}
     if total_area > 0:
         point = (mesh_data['polygon_centers'][polygon_indices] * areas[:, None]).sum(axis=0) / total_area
         normal = (mesh_data['polygon_normals'][polygon_indices] * areas[:, None]).sum(axis=0)
@@ -683,6 +687,7 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
             extent = float(np.linalg.norm(coordinates.max(axis=0) - coordinates.min(axis=0)))
             tolerance = max(0.005 * extent, _FIT_ABS_TOL)
             residual = float(np.max(np.abs((mesh_data['polygon_centers'][polygon_indices] - point) @ normal)))
+            failure.update(extent=extent, residual=residual, tolerance=tolerance)
             if extent > 0 and residual <= tolerance:
                 # An edge is boundary when any polygon it carries fell outside the
                 # component; edges owned by the mesh border alone never qualify,
@@ -721,6 +726,10 @@ def _grow_planar_patch(mesh_data, seed_polygon, cos_planar=_FIT_COS_5):
 
     for polygon_index in component:
         mesh_data['polygon_patches'][polygon_index] = patch
+    if patch is None:
+        failures = mesh_data.setdefault('patch_failures', {})
+        for polygon_index in component:
+            failures[polygon_index] = failure
     return patch
 
 
@@ -1447,6 +1456,17 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label='key')
     # raw fragments would describe a neighbourhood the solver never saw.
     patches, clicked = _connector_walls(mesh_data, seeds, hops)
     if clicked is None:
+        failure = (
+            mesh_data.get('patch_failures', {}).get(int(seeds[0]))
+            if seeds else None
+        )
+        if failure and failure.get('residual') is not None:
+            return (
+                "the clicked face is not part of a flat patch -- flat growth from"
+                f" it swallowed {failure['faces']} face(s) and bowed"
+                f" {failure['residual']:.5f} against a flatness allowance of"
+                f" {failure['tolerance']:.5f}, so the surface there curves"
+            )
         return "the clicked face is not part of a flat patch"
     anchor = np.array(anchor, dtype=np.float64)
     facing = skewed = behind = 0
@@ -2019,6 +2039,11 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
     anchor = np.array(anchor, dtype=np.float64)
     say(f"clicked face {index}, anchor "
         f"{tuple(round(float(value), 5) for value in anchor)}")
+    # With centre picks the anchor legitimately moves along the wall, but a
+    # distance on the order of the part itself means the face index and the hit
+    # came from different meshes -- the one failure the numbers below cannot show.
+    say(f"anchor is {float(np.linalg.norm(anchor - mesh_data['polygon_centers'][index])):.5f}"
+        " from the clicked face's centre")
     try:
         raw = _candidate_patches(mesh_data, seeds, _CONNECTOR_MAX_HOPS)
         walls, clicked = _connector_walls(mesh_data, seeds, _CONNECTOR_MAX_HOPS)
@@ -2028,6 +2053,17 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
     say(f"at full depth: {len(raw)} raw patches -> {len(walls)} merged walls")
     if clicked is None:
         say("the clicked face did not land in any merged wall")
+        failure = mesh_data.get('patch_failures', {}).get(index)
+        if failure and failure.get('residual') is not None:
+            say(f"flat growth from it swallowed {failure['faces']} face(s)"
+                f" spanning {failure['extent']:.5f} and bowed"
+                f" {failure['residual']:.5f} against a flatness allowance of"
+                f" {failure['tolerance']:.5f} -- the surface there curves"
+                " (rounded geometry, or a smoothing modifier: try Ignore"
+                " modifiers)")
+        elif failure:
+            say(f"flat growth from it found {failure['faces']} face(s) with no"
+                f" usable area or normal (area {failure['area']:.9f})")
         return lines
     say(f"clicked wall: area {clicked['area']:.6f} extent {clicked['extent']:.6f}"
         f" normal {tuple(round(float(v), 4) for v in clicked['normal'])}")
@@ -2059,7 +2095,10 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
 
     pairs, reason = _connector_pairs(mesh_data, seeds, anchor, label.lower())
     say(f"opposed wall pairs: {len(pairs)}")
-    for pair in pairs[:6]:
+    # A taper-mismatch refusal quotes the closest pair combination, which need
+    # not be among the largest; a short preview can hide exactly the pair the
+    # refusal was measured against.
+    for pair in pairs[:24]:
         # Which side is the socket is read off the wall normals, not off click
         # order, and it decides which way the clearance is subtracted -- so a
         # width mismatch cannot be read at all without it.
@@ -2075,6 +2114,26 @@ def lock_key_diagnostic_report(mesh_data, face_index, anchor, label):
             wall = pair[side]
             say(f"        {side[:-6]:>4} wall area {wall['area']:10.5f}"
                 f" normal {tuple(round(float(v), 4) for v in wall['normal'])}")
+    if len(pairs) > 24:
+        say(f"    ... and {len(pairs) - 24} more")
+    # The pairs above come from the widening search, which stops at the first
+    # radius offering two independent axes -- walls listed "in reach" at full
+    # depth can still be absent from them. This trace shows what was pairable at
+    # each radius, so a pair that only exists beyond the stop is visible.
+    say("widening trace (unfloored pairs per radius):")
+    for hop in range(2, _CONNECTOR_MAX_HOPS + 1):
+        try:
+            reached, _clicked = _connector_walls(mesh_data, seeds, hop)
+            unfloored = _connector_side_pairs(reached, anchor)
+        except Exception as error:
+            say(f"    hops {hop:>2}: failed: {error}")
+            break
+        openings = sorted({
+            round(math.degrees(item['opening_angle']), 1) for item in unfloored
+        })
+        say(f"    hops {hop:>2}: {len(reached):>3} walls, {len(unfloored):>3}"
+            f" pairs, {_independent_axis_count(unfloored)} independent axes,"
+            f" openings {openings[:12]}")
     if reason:
         say(f"refused: {reason}")
     return lines
