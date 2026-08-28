@@ -3,6 +3,7 @@ import numpy as np
 import time
 import logging
 import mathutils
+from contextlib import contextmanager
 from mathutils import Vector
 from bpy_extras import view3d_utils
 from . import quicksnap_utils
@@ -11,6 +12,20 @@ __name_addon__ = '.'.join(__name__.split('.')[:-1])
 logger = logging.getLogger(__name_addon__)
 
 SEARCH_RADIUS_PX = 20  # Pixel radius of the closest-point query; also the grid cell size.
+
+
+@contextmanager
+def temporarily_hidden(objects):
+    states = [(obj, obj.hide_get(), obj.select_get()) for obj in objects]
+    try:
+        for obj, _, _ in states:
+            obj.hide_set(True)
+        yield
+    finally:
+        for obj, hidden, selected in states:
+            obj.hide_set(False)
+            obj.select_set(selected)
+            obj.hide_set(hidden)
 
 
 def time_it(func):
@@ -45,6 +60,9 @@ class ObjectPointData:
         # logger.debug(f"ObjectPointData {obj.name}- check_select={check_select} - filter_selected={filter_selected}")
         matrix_world = obj.matrix_world
         self.is_curve = obj.type == 'CURVE' and snap_type == 'POINTS'
+        if obj.type == 'CURVE' and not self.is_curve:
+            self.completed = True
+            return
         # Gather object space points coordinates from the mesh/curves data
         if obj.type == 'MESH':
             if snap_type == 'POINTS':
@@ -105,6 +123,9 @@ class ObjectPointData:
             elif snap_type == 'FACES':
                 polygons = obj.data.polygons
                 polygons_count = len(polygons)
+                if polygons_count == 0:
+                    self.completed = True
+                    return
                 points_object_space = np.empty(polygons_count * 3, dtype=np.float64)
                 polygons.foreach_get('center', points_object_space)
                 points_object_space.shape = (polygons_count, 3)
@@ -121,7 +142,7 @@ class ObjectPointData:
                     polygons.foreach_get('loop_total', polygon_vert_count)
 
                     polygon_vert_start_index = np.concatenate(
-                        [np.zeros(1, dtype=int), np.cumsum(polygon_vert_count[1:])])
+                        [np.zeros(1, dtype=int), np.cumsum(polygon_vert_count[:-1])])
 
                     polygon_verts = np.empty(np.sum(polygon_vert_count), dtype=int)
                     polygons.foreach_get('vertices', polygon_verts)
@@ -266,7 +287,6 @@ class SnapData:
             self.kd = mathutils.kdtree.KDTree(max_vertex_count)
         self.world_space = np.empty((max_vertex_count, 3), dtype=np.float64)
         self.region_2d = np.empty((max_vertex_count, 3), dtype=np.float64)
-        self.depth = np.empty(max_vertex_count, dtype=np.float64)
         self.indices = np.empty(max_vertex_count, dtype=int)
         self.spline_index = np.empty(max_vertex_count, dtype=int)
         self.object_id = np.empty(max_vertex_count, dtype=int)
@@ -298,10 +318,12 @@ class SnapData:
             self.scene_meshes = scene_meshes.copy()
             self.scene_meshes.extend(selected_meshes.copy())
             self.kd_origins = mathutils.kdtree.KDTree(len(self.scene_meshes))
+            self.scene_object_indices = {name: index for index, name in enumerate(self.scene_meshes)}
             self.add_scene_roots(context, selected_meshes, scene_meshes)
         else:   # Add selection origins
             self.scene_meshes = selected_meshes.copy()
             self.kd_origins = mathutils.kdtree.KDTree(len(selected_meshes))
+            self.scene_object_indices = {name: index for index, name in enumerate(self.scene_meshes)}
             self.add_scene_roots(context, selected_meshes)
 
         self.meshes_selection = selected_meshes
@@ -372,7 +394,7 @@ class SnapData:
                 else:
                     obj = bpy.data.objects[object_name]
                 self.objects_point_data[object_name] = ObjectPointData(obj,
-                                                                       self.scene_meshes.index(object_name),
+                                                                       self.scene_object_indices[object_name],
                                                                        self.perspective_matrix,
                                                                        width=self.width,
                                                                        height=self.height,
@@ -383,7 +405,8 @@ class SnapData:
                                                                        filter_selected=self.is_origin_snapdata,
                                                                        snap_type=self.snap_type)
 
-                self.to_process_selected.insert(0, object_name)
+                if not self.objects_point_data[object_name].completed:
+                    self.to_process_selected.insert(0, object_name)
                 if self.is_origin_snapdata:
                     quicksnap_utils.revert_mode(current_mode)
                     self.selected_ids[object_name] = []
@@ -403,10 +426,7 @@ class SnapData:
                 else:
                     obj = bpy.data.objects[object_name].evaluated_get(depsgraph)
 
-                if object_name not in self.scene_meshes:
-                    object_index = -1
-                else:
-                    object_index = self.scene_meshes.index(object_name)
+                object_index = self.scene_object_indices.get(object_name, -1)
                 self.objects_point_data[object_name] = ObjectPointData(obj,
                                                                        object_index,
                                                                        self.perspective_matrix,
@@ -416,8 +436,8 @@ class SnapData:
                                                                        height_half=self.height_half,
                                                                        view_location=self.view_location,
                                                                        snap_type=self.snap_type)
-                # logger.debug(f"Adding to target verts data scene:{object_name}")
-                self.to_process_scene.append(object_name)
+                if not self.objects_point_data[object_name].completed:
+                    self.to_process_scene.append(object_name)
 
     def add_scene_roots(self, context, selected_meshes, scene_meshes=None):
         """
@@ -469,7 +489,7 @@ class SnapData:
         """
         logger.debug(f"[origin:{self.is_origin_snapdata}] - Add object root: {object_name}")
         if not self.add_point(context, Vector((0, 0, 0)), bpy.data.objects[object_name].matrix_world,
-                              self.scene_meshes.index(object_name), add_to_kd=self.snap_origins == "ALWAYS"):
+                              self.scene_object_indices[object_name], add_to_kd=self.snap_origins == "ALWAYS"):
             return
         insert_index = self.added_points_np - 1
         logger.debug(f"[origin:{self.is_origin_snapdata}] - add_object_root: {object_name} - insert index={insert_index}")
@@ -492,7 +512,7 @@ class SnapData:
         region3d = context.space_data.region_3d
         if region3d.view_perspective == 'CAMERA' and not region3d.is_perspective:
             rotation = view3d_utils.region_2d_to_vector_3d(context.region, region3d, (0, 0)).normalized()
-            view_location = context.space_data.camera.location
+            view_location = context.space_data.camera.matrix_world.translation
             cam_to_point_vector = (ws - view_location).normalized()
             dot = cam_to_point_vector.dot(rotation)
             if dot < 0: #behing camera in ortho camera
@@ -541,8 +561,7 @@ class SnapData:
         self.world_space[start_insert:end_insert] = points_data.world_space_co[start_index:end_index]
         self.region_2d[start_insert:end_insert] = points_data.screen_space_co[start_index:end_index]
         self.region_2d[start_insert:end_insert, 2] = points_data.screen_space_co[start_index:end_index, 2] * 0.00000001
-        self.depth[start_insert:end_insert] = points_data.screen_space_co[start_index:end_index, 2]
-        self.object_id[start_insert:end_insert] = np.full(insert_count, points_data.object_id, dtype=int)
+        self.object_id[start_insert:end_insert] = points_data.object_id
         self.in_query[start_insert:end_insert] = True
         self.indices[start_insert:end_insert] = points_data.indices[start_index:end_index]
         if points_data.is_curve:
@@ -613,33 +632,30 @@ class SnapData:
 
         # Process scene objects
         if len(self.to_process_scene) > 0:
-            for selected_object in self.meshes_selection:
-                bpy.data.objects[selected_object].hide_set(True)
-            for object_name in self.to_process_scene.copy():
-                obj = bpy.data.objects[object_name]
-                if object_name not in self.objects_point_data:
-                    continue
-                logger.debug(
-                    f"process_iteration unselected: {object_name} - added points:{self.added_points_np} - max vertex count:{len(self.world_space)}")
-                start_time_batch = time.perf_counter()
-                counter = 0
-                start_insert_id = self.added_points_np
-                while not self.objects_point_data[object_name].completed:
-                    self.process_points_data_batch(object_name, 1000)
-                    counter += 1
-                    if self.objects_point_data[object_name].completed:
-                        logger.debug(f"process_iteration scene:{object_name} - ALL VERTS ADDED")
-                        self.to_process_scene.remove(object_name)
-                        self.processed.add(object_name)
-                        self.balance_tree(start_insert_id, self.added_points_np)
-                        break
-                    elapsed_time = (time.perf_counter() - start_time)
-                    if elapsed_time > max_run_duration:
-                        self.balance_tree(start_insert_id, self.added_points_np)
-                        return True
-            for selected_object in self.meshes_selection:
-                bpy.data.objects[selected_object].hide_set(False)
-                bpy.data.objects[selected_object].select_set(True)
+            selected_objects = [bpy.data.objects[name] for name in self.meshes_selection]
+            with temporarily_hidden(selected_objects):
+                for object_name in self.to_process_scene.copy():
+                    obj = bpy.data.objects[object_name]
+                    if object_name not in self.objects_point_data:
+                        continue
+                    logger.debug(
+                        f"process_iteration unselected: {object_name} - added points:{self.added_points_np} - max vertex count:{len(self.world_space)}")
+                    start_time_batch = time.perf_counter()
+                    counter = 0
+                    start_insert_id = self.added_points_np
+                    while not self.objects_point_data[object_name].completed:
+                        self.process_points_data_batch(object_name, 1000)
+                        counter += 1
+                        if self.objects_point_data[object_name].completed:
+                            logger.debug(f"process_iteration scene:{object_name} - ALL VERTS ADDED")
+                            self.to_process_scene.remove(object_name)
+                            self.processed.add(object_name)
+                            self.balance_tree(start_insert_id, self.added_points_np)
+                            break
+                        elapsed_time = (time.perf_counter() - start_time)
+                        if elapsed_time > max_run_duration:
+                            self.balance_tree(start_insert_id, self.added_points_np)
+                            return True
         return False
 
     def _build_screen_grid(self, n):
@@ -829,14 +845,14 @@ class SnapData:
         if len(close_points) == 1:
             # logger.debug(f"Closest id: {close_points[0][1]} - is origin: {close_points[0][1] in self.origins_map}")
             closest_point_data = (
-                close_points[0][1], close_points[0][3], self.scene_meshes[self.object_id[close_points[0][1]]],
+                close_points[0][1], close_points[0][3], self.object_name(close_points[0][1]),
                 close_points[0][1] in self.origins_map, close_points[0][4])
         elif len(close_points) > 1:
             # If multiple points, sort by distance to mouse
             closest = sorted(close_points, key=lambda point: point[2])[0]
             # logger.debug(f"Closest id: {close_points[0][1]} - is origin: {close_points[0][1] in self.origins_map}")
-            closest_point_data = (closest[1], closest[3], self.scene_meshes[self.object_id[close_points[0][1]]],
-                                  closest[0][1] in self.origins_map, close_points[0][4])
+            closest_point_data = (closest[1], closest[3], self.object_name(closest[1]),
+                                  closest[1] in self.origins_map, closest[4])
         self.last_query_ms = (time.perf_counter() - query_start) * 1000.0
         return closest_point_data
 
@@ -851,7 +867,7 @@ class SnapData:
                 for obj_name in selected_objects:
                     obj = bpy.data.objects[obj_name]
                     if obj.type == 'MESH':
-                        if self.object_mode:
+                        if self.object_mode and not self.settings.ignore_modifiers:
                             data = obj.evaluated_get(depsgraph).data
                         else:
                             data = obj.data
@@ -908,19 +924,10 @@ class SnapData:
         return max_vertex_count
 
     def add_nearby_objects(self, context, region, depsgraph, mouse_position, selected_objs=[]):
-        # Now we will search for other objects to process around the mouse.
-        for obj in self.processed:  # Hide already processed meshes
-            if obj not in bpy.data.objects:
-                continue
-            bpy.data.objects[obj].hide_set(True)
-
-
-        # Look for close objects (8 raycasts 40px around the mouse cursor)
-        close_objects = quicksnap_utils.check_close_objects(context, region, depsgraph, mouse_position)
-        for obj in self.processed:  # un-hiding processed objects, for obstruction check
-            if obj not in bpy.data.objects:
-                continue
-            bpy.data.objects[obj].hide_set(False)
+        processed_objects = [bpy.data.objects[name] for name in self.processed if name in bpy.data.objects]
+        with temporarily_hidden(processed_objects):
+            # Look for close objects (8 raycasts 40px around the mouse cursor)
+            close_objects = quicksnap_utils.check_close_objects(context, region, depsgraph, mouse_position)
 
         # Add the close objects to the to-process list
         for obj in close_objects:
@@ -955,11 +962,14 @@ class SnapData:
 
         return False, None, -1
 
-    def get_object_name_at_index(self, index):
+    def object_name(self, index):
         object_id = self.object_id[index]
-        if len(self.scene_meshes) < object_id:
+        if object_id < 0 or object_id >= len(self.scene_meshes):
             return None
         return self.scene_meshes[object_id]
+
+    def get_object_name_at_index(self, index):
+        return self.object_name(index)
 
     def select_points(self, obj, point_index):
         if obj.type == 'MESH':

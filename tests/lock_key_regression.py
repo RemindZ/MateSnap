@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import types
 
 import bpy
-from mathutils import Euler, Vector
+from mathutils import Euler, Matrix, Vector
 import numpy as np
 
 
@@ -32,6 +32,34 @@ OPERATOR_SPEC = importlib.util.spec_from_file_location(
 quicksnap = importlib.util.module_from_spec(OPERATOR_SPEC)
 sys.modules[OPERATOR_SPEC.name] = quicksnap
 OPERATOR_SPEC.loader.exec_module(quicksnap)
+
+
+def assert_blender_5_metadata():
+    package_spec = importlib.util.spec_from_file_location(
+        PACKAGE_NAME, ROOT / "__init__.py", submodule_search_locations=[str(ROOT)]
+    )
+    package = importlib.util.module_from_spec(package_spec)
+    sys.modules[PACKAGE_NAME] = package
+    reload_module = importlib.reload
+
+    def reload_without_background_shader(module):
+        if module.__name__ == RENDER_STUB.__name__:
+            return module
+        return reload_module(module)
+
+    importlib.reload = reload_without_background_shader
+    try:
+        package_spec.loader.exec_module(package)
+    finally:
+        importlib.reload = reload_module
+    if package.bl_info["blender"] != (5, 0, 0):
+        raise AssertionError(
+            f"expected Blender 5 baseline, got {package.bl_info['blender']!r}"
+        )
+    if package.bl_info["version"] != (2, 2, 1):
+        raise AssertionError(
+            f"expected MateSnap 2.2.1, got {package.bl_info['version']!r}"
+        )
 
 
 def clear_scene():
@@ -499,26 +527,438 @@ def assert_rotation_search_is_bounded():
         raise AssertionError(f"rotation search is not bounded: {fits} solves")
 
 
-def make_floored_lock_scene(euler):
+def make_floored_lock_scene(euler, disconnected_floor=False, taper=0.0):
     """A rotated key and a socket that has a floor, so the target click can land
     on the floor rather than on an inner wall."""
+    slope = math.tan(math.radians(taper))
+    key_tip_x, key_tip_y = 0.5 - slope, 0.4 - slope
+    lock_tip_x, lock_tip_y = 0.6 - 1.2 * slope, 0.5 - 1.2 * slope
     key = make_mesh(
         "Key",
-        [(-.5, -.4, -1), (.5, -.4, -1), (.5, .4, -1), (-.5, .4, -1),
+        [(-key_tip_x, -key_tip_y, -1), (key_tip_x, -key_tip_y, -1),
+         (key_tip_x, key_tip_y, -1), (-key_tip_x, key_tip_y, -1),
          (-.5, -.4, 0), (.5, -.4, 0), (.5, .4, 0), (-.5, .4, 0)],
         [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
          (2, 3, 7, 6), (3, 0, 4, 7)],
     )
+    floor_vertices = [(-lock_tip_x, -lock_tip_y, -1.2),
+                      (lock_tip_x, -lock_tip_y, -1.2),
+                      (lock_tip_x, lock_tip_y, -1.2),
+                      (-lock_tip_x, lock_tip_y, -1.2)]
     lock = make_mesh(
         "Lock",
         [(-.6, -.5, 0), (.6, -.5, 0), (.6, .5, 0), (-.6, .5, 0),
-         (-.6, -.5, -1.2), (.6, -.5, -1.2), (.6, .5, -1.2), (-.6, .5, -1.2)],
-        [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3), (4, 5, 6, 7)],
+         *floor_vertices,
+         *(floor_vertices if disconnected_floor else [])],
+        [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3),
+         (8, 9, 10, 11) if disconnected_floor else (4, 5, 6, 7)],
     )
     key.location = (2.0, -1.0, 0.0)
     key.rotation_euler = Euler(euler, 'XYZ')
     bpy.context.view_layer.update()
     return key, lock
+
+
+def disconnected_floored_lock(euler=(0.35, -0.25, 0.5), taper=0.0):
+    """A socket whose floor is a separate mesh island from its walls."""
+    key, lock = make_floored_lock_scene(
+        euler, disconnected_floor=True, taper=taper
+    )
+    return key, lock, 4
+
+
+def world_normal(obj, face_index):
+    normal = obj.matrix_world.to_3x3().inverted().transposed() @ obj.data.polygons[face_index].normal
+    return normal.normalized()
+
+
+def assert_disconnected_floor_end_face_rotation():
+    """A disconnected socket floor must not make a valid end-face mate impossible."""
+    clear_scene()
+    key, lock, floor_face = disconnected_floored_lock()
+    key_face = 0
+    key_hit = key.matrix_world @ key.data.polygons[key_face].center
+    floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+    source_normal = world_normal(key, key_face)
+    target_normal = world_normal(lock, floor_face)
+
+    source_data = quicksnap_utils._mesh_fit_data(key)
+    source_pairs, _ = quicksnap_utils._connector_pairs(
+        source_data,
+        quicksnap_utils._seed_polygons(source_data, 'FACES', key_face),
+        np.array(key_hit, dtype=np.float64), 'key',
+    )
+    source_axes = quicksnap_utils._independent_axis_count(source_pairs)
+    if source_axes < 2:
+        raise AssertionError(
+            f"fixture exposed only {source_axes} independent source axes"
+        )
+
+    target_data = quicksnap_utils._mesh_fit_data(lock)
+    target_pairs, _ = quicksnap_utils._connector_pairs(
+        target_data,
+        quicksnap_utils._seed_polygons(target_data, 'FACES', floor_face),
+        np.array(floor_hit, dtype=np.float64), 'lock',
+    )
+    if target_pairs:
+        raise AssertionError(
+            f"fixture floor reconnected to {len(target_pairs)} target wall pairs"
+        )
+
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, key_face, key_hit, lock.name, floor_face, floor_hit,
+        allow_rotation=True, source_normal=source_normal, target_normal=target_normal,
+    )
+    if delta is None:
+        raise AssertionError(
+            "a centered end-face/disconnected-floor mate returned no transform"
+        )
+    assert_matrix_finite(delta)
+    landed_hit = delta @ key_hit
+    if (landed_hit - floor_hit).length > 1e-6:
+        raise AssertionError(
+            f"end face did not preserve the target floor coordinate: {landed_hit[:]}"
+        )
+    key.matrix_world = delta @ key.matrix_world
+    if abs(key.matrix_world.translation.x) > 1e-6 or abs(key.matrix_world.translation.y) > 1e-6:
+        raise AssertionError(f"mate was not laterally centered: {key.matrix_world.translation[:]}")
+    if (delta.to_3x3() @ source_normal).dot(target_normal) > -math.cos(math.radians(10.0)):
+        raise AssertionError("clicked end and floor faces were not opposed within ten degrees")
+
+
+def assert_disconnected_recovery_handles_draft_and_scale():
+    for label, taper, scale in (
+        ('drafted', 7.0, (1.0, 1.0, 1.0)),
+        ('non-uniform', 0.0, (1.4, 0.8, 1.2)),
+    ):
+        clear_scene()
+        key, lock, floor_face = disconnected_floored_lock(taper=taper)
+        key.scale = scale
+        lock.scale = scale
+        bpy.context.view_layer.update()
+        key_hit = key.matrix_world @ key.data.polygons[0].center
+        floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, 0, key_hit, lock.name, floor_face, floor_hit,
+            allow_rotation=True,
+            source_normal=world_normal(key, 0),
+            target_normal=world_normal(lock, floor_face),
+        )
+        if delta is None:
+            raise AssertionError(f"{label} disconnected-floor recovery was refused")
+        assert_matrix_finite(delta)
+
+
+def assert_disconnected_search_stops_when_saturated():
+    clear_scene()
+    _key, lock, floor_face = disconnected_floored_lock()
+    floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+    mesh_data = quicksnap_utils._mesh_fit_data(lock)
+    seeds = quicksnap_utils._seed_polygons(mesh_data, 'FACES', floor_face)
+    calls = []
+    original = quicksnap_utils._connector_walls
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    quicksnap_utils._connector_walls = counting
+    try:
+        pairs, _reason = quicksnap_utils._connector_pairs(
+            mesh_data, seeds, np.array(floor_hit, dtype=np.float64), 'lock'
+        )
+    finally:
+        quicksnap_utils._connector_walls = original
+    if pairs:
+        raise AssertionError("disconnected floor unexpectedly found topology-local pairs")
+    if len(calls) > 5:
+        raise AssertionError(
+            f"saturated disconnected search repeated {len(calls)} wall traversals"
+        )
+
+
+def make_spatial_recovery_decoy(kind):
+    key, stale_lock = make_floored_lock_scene((0.35, -0.25, 0.5))
+    bpy.data.objects.remove(stale_lock, do_unlink=True)
+    vertices = []
+    faces = []
+
+    def quad(points):
+        start = len(vertices)
+        vertices.extend(points)
+        faces.append(tuple(range(start, start + 4)))
+
+    def cavity(x_half, y_half, z_low, z_high, x_span=None, y_span=None):
+        x_low, x_high = x_span or (-x_half, x_half)
+        y_low, y_high = y_span or (-y_half, y_half)
+        quad([(-x_half, y_low, z_high), (-x_half, y_low, z_low),
+              (-x_half, y_high, z_low), (-x_half, y_high, z_high)])
+        quad([(x_half, y_high, z_high), (x_half, y_high, z_low),
+              (x_half, y_low, z_low), (x_half, y_low, z_high)])
+        quad([(x_high, -y_half, z_high), (x_high, -y_half, z_low),
+              (x_low, -y_half, z_low), (x_low, -y_half, z_high)])
+        quad([(x_low, y_half, z_high), (x_low, y_half, z_low),
+              (x_high, y_half, z_low), (x_high, y_half, z_high)])
+
+    if kind == 'cross':
+        cavity(0.6, 0.5, -1.2, 0.0, x_span=(0.25, 0.75), y_span=(0.25, 0.75))
+    elif kind == 'stacked':
+        cavity(0.6, 0.5, -1.2, -0.7)
+        cavity(0.6, 0.5, -0.5, 0.0)
+    elif kind == 'fragmented':
+        cavity(0.6, 0.5, -1.2, -0.6)
+        cavity(0.6, 0.5, -0.6, 0.0)
+    elif kind == 'one-axis':
+        cavity(0.6, 0.5, -1.2, 0.0)
+        del faces[2:]
+        del vertices[8:]
+    elif kind == 'remote':
+        cavity(0.6, 0.5, -1.2, 0.0)
+        vertices[:] = [(x + 3.0, y, z) for x, y, z in vertices]
+    elif kind == 'behind':
+        cavity(0.6, 0.5, -2.4, -1.4)
+    elif kind == 'body':
+        cavity(3.0, 2.0, -1.2, 0.0)
+    elif kind == 'overlap':
+        quad([(-0.6, -0.7, 0.0), (-0.6, -0.7, -1.2),
+              (-0.6, 1.1, -1.2), (-0.6, 1.1, 0.0)])
+        quad([(0.6, 1.1, 0.0), (0.6, 1.1, -1.2),
+              (0.6, -0.7, -1.2), (0.6, -0.7, 0.0)])
+        quad([(1.2, -0.65, 0.0), (1.2, -0.65, -1.2),
+              (-0.8, -0.65, -1.2), (-0.8, -0.65, 0.0)])
+        quad([(-0.8, 0.35, 0.0), (-0.8, 0.35, -1.2),
+              (1.2, 0.35, -1.2), (1.2, 0.35, 0.0)])
+    else:
+        raise AssertionError(f"unknown spatial recovery decoy {kind!r}")
+
+    floor_start = len(vertices)
+    vertices.extend([(-0.2, -0.2, -1.2), (0.2, -0.2, -1.2),
+                     (0.2, 0.2, -1.2), (-0.2, 0.2, -1.2)])
+    faces.append(tuple(range(floor_start, floor_start + 4)))
+    lock = make_mesh(f"SpatialRecovery{kind.title()}", vertices, faces)
+    bpy.context.view_layer.update()
+    return key, lock, len(faces) - 1
+
+
+def assert_spatial_recovery_rejects_incoherent_frames():
+    for kind in ('cross', 'stacked', 'overlap'):
+        clear_scene()
+        key, lock, floor_face = make_spatial_recovery_decoy(kind)
+        key_hit = key.matrix_world @ key.data.polygons[0].center
+        floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, 0, key_hit, lock.name, floor_face, floor_hit,
+            allow_rotation=True,
+            source_normal=world_normal(key, 0),
+            target_normal=world_normal(lock, floor_face),
+        )
+        if delta is not None:
+            raise AssertionError(
+                f"spatial recovery synthesized a connector from {kind} cavity walls"
+            )
+
+
+def assert_spatial_recovery_rejects_decoys():
+    for kind in ('one-axis', 'remote', 'behind', 'body'):
+        clear_scene()
+        key, lock, floor_face = make_spatial_recovery_decoy(kind)
+        key_hit = key.matrix_world @ key.data.polygons[0].center
+        floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, 0, key_hit, lock.name, floor_face, floor_hit,
+            allow_rotation=True,
+            source_normal=world_normal(key, 0),
+            target_normal=world_normal(lock, floor_face),
+        )
+        if delta is not None:
+            raise AssertionError(f"spatial recovery accepted the {kind} decoy")
+
+
+def assert_spatial_recovery_diagnostics_are_specific():
+    for kind, expected in (
+        ('remote', 'no bounded planar wall candidates'),
+        ('stacked', 'distinct compatible frames'),
+    ):
+        clear_scene()
+        key, lock, floor_face = make_spatial_recovery_decoy(kind)
+        key_hit = key.matrix_world @ key.data.polygons[0].center
+        floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, 0, key_hit, lock.name, floor_face, floor_hit,
+            allow_rotation=True,
+            source_normal=world_normal(key, 0),
+            target_normal=world_normal(lock, floor_face),
+            diagnostics=diagnostics,
+        )
+        if delta is not None or not any(expected in note for note in diagnostics):
+            raise AssertionError(
+                f"{kind} recovery refusal was not diagnosed specifically: {diagnostics}"
+            )
+
+
+def assert_spatial_recovery_merges_touching_fragments():
+    clear_scene()
+    key, lock, floor_face = make_spatial_recovery_decoy('fragmented')
+    key_hit = key.matrix_world @ key.data.polygons[0].center
+    floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        key.name, 0, key_hit, lock.name, floor_face, floor_hit,
+        allow_rotation=True,
+        source_normal=world_normal(key, 0),
+        target_normal=world_normal(lock, floor_face),
+    )
+    if delta is None:
+        raise AssertionError("touching coplanar wall fragments did not recover one frame")
+    assert_matrix_finite(delta)
+
+
+def assert_spatial_recovery_is_symmetric():
+    clear_scene()
+    key, lock, floor_face = disconnected_floored_lock()
+    key.matrix_world = Matrix.Identity(4)
+    lock.location = (2.0, -1.0, 0.0)
+    lock.rotation_euler = Euler((0.35, -0.25, 0.5), 'XYZ')
+    bpy.context.view_layer.update()
+    floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+    key_hit = key.matrix_world @ key.data.polygons[0].center
+    delta = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, SimpleNamespace(ignore_modifiers=True),
+        lock.name, floor_face, floor_hit, key.name, 0, key_hit,
+        allow_rotation=True,
+        source_normal=world_normal(lock, floor_face),
+        target_normal=world_normal(key, 0),
+    )
+    if delta is None:
+        raise AssertionError("spatial recovery failed when the disconnected socket moves")
+    assert_matrix_finite(delta)
+
+
+def assert_spatial_recovery_does_not_replace_ambiguity():
+    def pair(axis, opening=math.pi, low_normal=None, high_normal=None):
+        axis = np.array(axis, dtype=np.float64)
+        low_normal = np.array(low_normal or -axis, dtype=np.float64)
+        high_normal = np.array(high_normal or axis, dtype=np.float64)
+        return {
+            'axis': axis,
+            'opening_angle': opening,
+            'anchor_side': None,
+            'low_patch': {'normal': low_normal},
+            'high_patch': {'normal': high_normal},
+        }
+
+    known = [pair((1.0, 0.0, 0.0)), pair((0.0, 1.0, 0.0))]
+    ambiguous = [
+        pair((1.0, 0.0, 0.0)),
+        pair((1.0, 0.0, 0.0), opening=math.radians(120.0)),
+    ]
+    reasons = []
+    eligibility = quicksnap_utils._spatial_recovery_eligibility(
+        known, ambiguous, (0.0, 0.0, 1.0), (0.0, 0.0, 1.0), reasons
+    )
+    if eligibility is not None:
+        raise AssertionError("ambiguous local walls were reinterpreted as missing geometry")
+    if not any("ambiguous" in reason for reason in reasons):
+        raise AssertionError(f"ambiguous recovery ineligibility was not diagnosed: {reasons}")
+
+    three_axes = known + [pair((2 ** -0.5, 2 ** -0.5, 0.0))]
+    reasons = []
+    eligibility = quicksnap_utils._spatial_recovery_eligibility(
+        three_axes, [], (0.0, 0.0, 1.0), (0.0, 0.0, 1.0), reasons
+    )
+    if eligibility is not None:
+        raise AssertionError("a third known lateral axis was silently discarded")
+    if not any("more than two" in reason for reason in reasons):
+        raise AssertionError(f"third-axis recovery ineligibility was not diagnosed: {reasons}")
+
+
+def assert_spatial_recovery_is_isolated():
+    """The disconnected-frame fallback must stay off ordinary solver paths."""
+    recovery_name = "_recover_spatial_connector_frame"
+    missing = object()
+    original_recovery = getattr(quicksnap_utils, recovery_name, missing)
+
+    def unexpected_recovery(*args, **kwargs):
+        raise AssertionError("spatial recovery ran outside its cold-path eligibility")
+
+    try:
+        setattr(quicksnap_utils, recovery_name, unexpected_recovery)
+
+        clear_scene()
+        key, lock, floor_face = disconnected_floored_lock()
+        key_hit = key.matrix_world @ key.data.polygons[0].center
+        floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+        quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, 0, key_hit, lock.name, floor_face, floor_hit,
+            allow_rotation=False,
+            source_normal=world_normal(key, 0),
+            target_normal=world_normal(lock, floor_face),
+        )
+
+        clear_scene()
+        key, key_face, key_hit, lock, lock_face, lock_hit = make_rotated_key_lock()
+        kwargs = dict(
+            allow_rotation=True,
+            source_normal=world_normal(key, key_face),
+            target_normal=world_normal(lock, lock_face),
+        )
+        setattr(quicksnap_utils, recovery_name, original_recovery)
+        baseline = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit, **kwargs,
+        )
+        setattr(quicksnap_utils, recovery_name, unexpected_recovery)
+        guarded = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, key_face, key_hit, lock.name, lock_face, lock_hit, **kwargs,
+        )
+        if baseline is None or guarded is None or not np.allclose(
+            np.array(baseline), np.array(guarded), atol=1e-8, rtol=0.0
+        ):
+            raise AssertionError("anchored wall rotation changed under recovery guard")
+
+        clear_scene()
+        key, lock, floor_face = disconnected_floored_lock()
+        key_hit = key.matrix_world @ key.data.polygons[0].center
+        floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+        source_raycast_normal = world_normal(key, 0)
+        target_raycast_normal = world_normal(lock, floor_face)
+        original_clicked_normal = quicksnap_utils._clicked_face_normal
+        quicksnap_utils._clicked_face_normal = lambda *args: None
+        try:
+            quicksnap_utils.compute_lock_key_transform(
+                bpy.context, SimpleNamespace(ignore_modifiers=True),
+                key.name, 0, key_hit, lock.name, floor_face, floor_hit,
+                allow_rotation=True,
+                source_normal=source_raycast_normal,
+                target_normal=target_raycast_normal,
+            )
+        finally:
+            quicksnap_utils._clicked_face_normal = original_clicked_normal
+
+        clear_scene()
+        key, lock = make_floored_lock_scene((0.35, -0.25, 0.5))
+        key_hit = key.matrix_world @ key.data.polygons[0].center
+        floor_hit = lock.matrix_world @ lock.data.polygons[4].center
+        quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, 0, key_hit, lock.name, 4, floor_hit,
+            allow_rotation=True,
+            source_normal=world_normal(key, 0),
+            target_normal=world_normal(lock, 4),
+        )
+    finally:
+        if original_recovery is missing:
+            delattr(quicksnap_utils, recovery_name)
+        else:
+            setattr(quicksnap_utils, recovery_name, original_recovery)
 
 
 def assert_insertion_direction_is_constrained():
@@ -1049,9 +1489,12 @@ def assert_surroundings_pick_the_spin():
         (0.55, 0.548, 0.0), (-0.55, 0.548, 0.0),
         (-0.55, -0.548, -1.4), (0.55, -0.548, -1.4),
         (0.55, 0.548, -1.4), (-0.55, 0.548, -1.4),
+        (-0.55, -0.548, -1.4), (0.55, -0.548, -1.4),
+        (0.55, 0.548, -1.4), (-0.55, 0.548, -1.4),
     ]
     lock_faces = [
-        (1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3), (4, 5, 6, 7),
+        (1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3),
+        (8, 9, 10, 11),
     ]
     for blocked in ((-1.15, 0.0), (0.0, 1.15), (0.0, -1.15)):
         box(*blocked)
@@ -1231,6 +1674,9 @@ def make_switch_stub(calls, lock_and_key_mode, object_mode=True, no_selection=Fa
     for method_name in ("can_enter_lock_key_mode", "switch_lock_key_mode"):
         method = quicksnap.QuickVertexSnapOperator.__dict__[method_name]
         setattr(operator, method_name, types.MethodType(method, operator))
+    operator.can_initialize_lock_key = quicksnap.QuickVertexSnapOperator.__dict__[
+        "can_initialize_lock_key"
+    ].__func__
     return operator
 
 
@@ -1491,6 +1937,141 @@ def assert_failures_report_a_specific_reason():
     )
     if delta is None or diagnostics:
         raise AssertionError(f"successful mate recorded a reason: {diagnostics}")
+
+
+def assert_modal_lifecycle_helpers():
+    """Initialization and teardown must be transactional at their external edges."""
+    operator_type = quicksnap.QuickVertexSnapOperator
+
+    can_initialize = operator_type.__dict__["can_initialize_lock_key"].__func__
+    hidden = []
+    visible = SimpleNamespace(name="visible", hide_get=lambda: False)
+    ignored = SimpleNamespace(
+        name="ignored", hide_get=lambda: False,
+        hide_set=lambda value: hidden.append(value),
+    )
+    context = SimpleNamespace(
+        space_data=SimpleNamespace(local_view=object()),
+        view_layer=SimpleNamespace(objects=[visible, ignored]),
+        visible_objects=[visible],
+    )
+    if can_initialize(False, False) or can_initialize(True, True):
+        raise AssertionError("invalid Lock and key state passed preflight")
+    if hidden:
+        raise AssertionError("preflight mutated Local View visibility")
+
+    capture = operator_type.__dict__["capture_view_state"].__func__
+    view_matrix = Matrix.Identity(4)
+    perspective = Matrix.Translation((1.0, 2.0, 3.0))
+    state = capture(SimpleNamespace(
+        view_matrix=view_matrix,
+        perspective_matrix=perspective,
+        view_distance=12.5,
+        view_camera_zoom=3.25,
+    ))
+    if state[1:] != (12.5, 3.25, perspective):
+        raise AssertionError(f"view sentinels were not captured together: {state!r}")
+
+    changed = operator_type.__dict__["geometry_settings_changed"].__func__
+    settings = SimpleNamespace(
+        ignore_modifiers=False, snap_source_type="VERT", snap_target_type="FACE",
+    )
+    if changed(settings, False, "VERT", "FACE"):
+        raise AssertionError("unchanged geometry settings requested a rebuild")
+    settings.ignore_modifiers = True
+    if not changed(settings, False, "VERT", "FACE"):
+        raise AssertionError("direct Ignore Modifiers change skipped SnapData rebuild")
+
+    calls = []
+    operator = SimpleNamespace(
+        _restore_scene=lambda context, revert: (_ for _ in ()).throw(RuntimeError("restore failed")),
+        cleanup_modal_resources=lambda context: calls.append("cleanup"),
+    )
+    terminate = operator_type.__dict__["terminate"]
+    try:
+        terminate(operator, SimpleNamespace(), revert=False)
+    except RuntimeError as exc:
+        if str(exc) != "restore failed":
+            raise
+    else:
+        raise AssertionError("scene restoration failure was swallowed")
+    if calls != ["cleanup"]:
+        raise AssertionError(f"cleanup was not guaranteed after restoration failure: {calls}")
+
+    cleanup = operator_type.__dict__["cleanup_modal_resources"]
+    original_remove_handlers = quicksnap.quicksnap_render.remove_draw_handlers
+    try:
+        timer = object()
+        remove_calls = []
+        cleanup_operator = SimpleNamespace(snapdata_target=None, _timer=timer)
+        cleanup_context = SimpleNamespace(window_manager=SimpleNamespace(
+            event_timer_remove=lambda value: remove_calls.append(value)
+        ))
+        quicksnap.quicksnap_render.remove_draw_handlers = lambda: (_ for _ in ()).throw(
+            RuntimeError("handler removal failed")
+        )
+        try:
+            cleanup(cleanup_operator, cleanup_context)
+        except RuntimeError as exc:
+            if str(exc) != "handler removal failed":
+                raise
+        else:
+            raise AssertionError("handler removal failure was swallowed")
+        if remove_calls != [timer] or cleanup_operator._timer is not None:
+            raise AssertionError("handler failure prevented timer cleanup")
+
+        class FailingSnapData:
+            @property
+            def is_enabled(self):
+                return True
+
+            @is_enabled.setter
+            def is_enabled(self, value):
+                raise RuntimeError("snapdata disable failed")
+
+        timer = object()
+        remove_calls = []
+        cleanup_operator = SimpleNamespace(snapdata_target=FailingSnapData(), _timer=timer)
+        quicksnap.quicksnap_render.remove_draw_handlers = lambda: None
+        try:
+            cleanup(cleanup_operator, cleanup_context)
+        except RuntimeError as exc:
+            if str(exc) != "snapdata disable failed":
+                raise
+        else:
+            raise AssertionError("snapdata disable failure was swallowed")
+        if remove_calls != [timer] or cleanup_operator._timer is not None:
+            raise AssertionError("snapdata failure prevented timer cleanup")
+
+        timer = object()
+        remove_calls = []
+        attempts = {"count": 0}
+
+        def remove_timer(value):
+            remove_calls.append(value)
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("timer removal failed")
+
+        cleanup_operator = SimpleNamespace(snapdata_target=None, _timer=timer)
+        cleanup_context = SimpleNamespace(window_manager=SimpleNamespace(
+            event_timer_remove=remove_timer
+        ))
+        try:
+            cleanup(cleanup_operator, cleanup_context)
+        except RuntimeError as exc:
+            if str(exc) != "timer removal failed":
+                raise
+        else:
+            raise AssertionError("timer removal failure was swallowed")
+        if cleanup_operator._timer is not timer:
+            raise AssertionError("failed timer removal lost the retry handle")
+        cleanup(cleanup_operator, cleanup_context)
+        cleanup(cleanup_operator, cleanup_context)
+        if remove_calls != [timer, timer] or cleanup_operator._timer is not None:
+            raise AssertionError(f"timer cleanup was not retry-safe: {remove_calls!r}")
+    finally:
+        quicksnap.quicksnap_render.remove_draw_handlers = original_remove_handlers
 
 
 def assert_terminate_survives_empty_selection():
@@ -2614,6 +3195,47 @@ def assert_region_extraction_matches_full():
         )
 
 
+def assert_disconnected_recovery_widens_to_full():
+    clear_scene()
+    key, lock, floor_face = disconnected_floored_lock()
+    key_face = 0
+    key_hit = key.matrix_world @ key.data.polygons[key_face].center
+    floor_hit = lock.matrix_world @ lock.data.polygons[floor_face].center
+    settings = SimpleNamespace(ignore_modifiers=True)
+    kwargs = dict(
+        allow_rotation=True,
+        source_normal=world_normal(key, key_face),
+        target_normal=world_normal(lock, floor_face),
+    )
+    full = quicksnap_utils.compute_lock_key_transform(
+        bpy.context, settings,
+        key.name, key_face, key_hit, lock.name, floor_face, floor_hit,
+        **kwargs,
+    )
+    if full is None:
+        raise AssertionError("full disconnected-floor control failed")
+
+    key_provider = quicksnap_utils.LockKeyMeshProvider(key_hit)
+    lock_provider = quicksnap_utils.LockKeyMeshProvider(floor_hit)
+    while True:
+        try:
+            delta = quicksnap_utils.compute_lock_key_transform(
+                bpy.context, settings,
+                key.name, key_face, key_hit, lock.name, floor_face, floor_hit,
+                source_mesh_data=key_provider.data(key),
+                target_mesh_data=lock_provider.data(lock),
+                **kwargs,
+            )
+            break
+        except quicksnap_utils.LockKeyRegionTooSmall as region:
+            if not region.provider.widen():
+                raise AssertionError("disconnected recovery could not widen to full")
+    if delta is None or not lock_provider.full:
+        raise AssertionError("disconnected spatial absence was trusted before full coverage")
+    if not np.allclose(np.array(delta), np.array(full), atol=1e-6, rtol=0.0):
+        raise AssertionError("region-first disconnected recovery differs from full coverage")
+
+
 def assert_parting_plane_click_is_named():
     """Clicking the flat face two halves meet on must say so.
 
@@ -2691,6 +3313,8 @@ def assert_parting_plane_click_is_named():
 
 
 def main():
+    assert_blender_5_metadata()
+    print("Blender 5 metadata: PASS")
     run_lock_key_case()
     print("straight translation: PASS")
     run_lock_key_case(lambda: make_tapered_key_lock(15.0))
@@ -2764,10 +3388,32 @@ def main():
     print("chamfer click names its wall: PASS")
     assert_region_extraction_matches_full()
     print("region extraction matches full coverage: PASS")
+    assert_disconnected_recovery_widens_to_full()
+    print("disconnected recovery widens to full coverage: PASS")
     assert_rotation_search_is_bounded()
     print("bounded rotation search: PASS")
     assert_insertion_direction_is_constrained()
     print("insertion direction constrained: PASS")
+    assert_disconnected_floor_end_face_rotation()
+    print("disconnected floor end-face rotation: PASS")
+    assert_disconnected_recovery_handles_draft_and_scale()
+    print("disconnected recovery handles draft and scale: PASS")
+    assert_disconnected_search_stops_when_saturated()
+    print("disconnected wall search stops when saturated: PASS")
+    assert_spatial_recovery_rejects_incoherent_frames()
+    print("spatial recovery rejects incoherent frames: PASS")
+    assert_spatial_recovery_rejects_decoys()
+    print("spatial recovery rejects decoys: PASS")
+    assert_spatial_recovery_diagnostics_are_specific()
+    print("spatial recovery diagnostics are specific: PASS")
+    assert_spatial_recovery_merges_touching_fragments()
+    print("spatial recovery merges touching fragments: PASS")
+    assert_spatial_recovery_is_symmetric()
+    print("spatial recovery is symmetric: PASS")
+    assert_spatial_recovery_does_not_replace_ambiguity()
+    print("spatial recovery preserves ambiguity: PASS")
+    assert_spatial_recovery_is_isolated()
+    print("spatial recovery isolation: PASS")
     assert_source_mesh_extracted_once()
     print("single extraction per object: PASS")
     assert_moving_hierarchy_is_handled()
@@ -2786,6 +3432,8 @@ def main():
     print("extra pairs yield to the walls: PASS")
     assert_failures_report_a_specific_reason()
     print("specific failure reasons: PASS")
+    assert_modal_lifecycle_helpers()
+    print("modal lifecycle helpers: PASS")
     assert_terminate_survives_empty_selection()
     print("terminate with empty selection: PASS")
     assert_lock_key_settings_persist()

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.1
+
+### Fixed
+- **Centered peg-end and socket-floor clicks now rotate across disconnected floor topology.** Some production sockets model the floor as a separate mesh island from their side walls. Lock and key now recovers one bounded, coherent wall frame around that floor and feeds it through the existing clearance, ambiguity, insertion, and surroundings checks. It still refuses underconstrained, overlapping, multiple-cavity, curved, or otherwise ambiguous geometry rather than guessing a spin.
+- Disconnected topology searches stop as soon as their reachable patch set is saturated instead of repeating the same failed traversal through all 30 hop limits.
+
+## 2.2.0
+
+### Changed
+- MateSnap now requires Blender 5.0 or newer; the obsolete legacy shader path has been removed.
+
 ## 2.1.0
 
 ### Added

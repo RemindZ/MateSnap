@@ -1,8 +1,6 @@
 import gpu
 from gpu_extras.batch import batch_for_shader
 
-shader_3d_polyline_smooth_color = gpu.shader.from_builtin('POLYLINE_SMOOTH_COLOR')
-
 shader_2d_image_info = gpu.types.GPUShaderCreateInfo()
 
 # Vertex shader inputs and uniforms that are now called constants.

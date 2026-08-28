@@ -1388,8 +1388,13 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
     best = []
     trimmed = []
     for fraction in (_CONNECTOR_MIN_WALL_FRACTION, 0.0):
+        previous_reached = None
         for hops in range(2, _CONNECTOR_MAX_HOPS + 1):
             reached, clicked = _connector_walls(mesh_data, seeds, hops)
+            reached_ids = frozenset(patch['id'] for patch in reached)
+            if reached_ids == previous_reached:
+                break
+            previous_reached = reached_ids
             # Measured against the merged wall, not a fragment of it. A floor set by
             # one sliver of a cut-up wall admits every other sliver and means nothing.
             floor = fraction * (0.0 if clicked is None else float(clicked['area']))
@@ -1629,6 +1634,12 @@ def _match_connector_pairs(source_pairs, target_pairs):
     for source in source_pairs:
         candidates = []
         for target in target_pairs:
+            if (
+                source.get('_spatial_axis_rank') is not None
+                and target.get('_spatial_axis_rank') is not None
+                and source['_spatial_axis_rank'] != target['_spatial_axis_rank']
+            ):
+                continue
             if float(source['axis'] @ target['axis']) < _FIT_COS_5:
                 continue
             if abs(source['opening_angle'] - target['opening_angle']) > angle_tolerance:
@@ -1722,6 +1733,12 @@ def _rotation_compatible(source, target):
     """Could this source/target mapping ever fit? Rotation-invariant tests only."""
     clearance = _pair_clearance(source, target)
     return (
+        (
+            source.get('_spatial_axis_rank') is None
+            or target.get('_spatial_axis_rank') is None
+            or source['_spatial_axis_rank'] == target['_spatial_axis_rank']
+        )
+        and
         clearance is not None
         and abs(source['opening_angle'] - target['opening_angle'])
         <= _CONNECTOR_TAPER_TOLERANCE
@@ -1795,6 +1812,374 @@ def _prune_rotation_pairs(source_pairs, target_pairs, diagnostics=None):
 # Sculpted end faces and parting planes sit within a few degrees of square to
 # their connector; ten matches the taper tolerance used everywhere else.
 _CLICK_FACES_OPPOSED_COS = math.cos(math.radians(10.0))
+
+
+def _spatial_recovery_eligibility(
+        source_pairs, target_pairs, source_click, target_click, reasons=None):
+    """Name the one side whose disconnected lateral frame may be recovered."""
+    def reject(reason):
+        if reasons is not None:
+            reasons.append(f"spatial recovery ineligible: {reason}")
+        return None
+
+    if source_click is None or target_click is None:
+        return reject("exact planar clicked patches are unavailable")
+    if (
+        any(pair['anchor_side'] for pair in source_pairs)
+        and any(pair['anchor_side'] for pair in target_pairs)
+    ):
+        return reject("explicit wall clicks keep the topology-local mapping")
+
+    def lateral(pairs, click_normal):
+        normal = np.array(click_normal, dtype=np.float64)
+        length = float(np.linalg.norm(normal))
+        if length <= 1e-12 or not np.isfinite(normal).all():
+            return None, "a clicked patch normal is invalid"
+        normal /= length
+        result = [
+            pair for pair in pairs
+            if pair['opening_angle'] >= _ROTATION_MIN_OPENING
+            and abs(float(pair['axis'] @ normal))
+            <= math.sin(math.radians(10.0))
+        ]
+        if len(result) > _ROTATION_MAX_PAIRS:
+            return None, "the local wall-pair budget was exceeded"
+        if _rotation_axis_ambiguous(result):
+            return None, "the local wall axes are ambiguous"
+        return result, None
+
+    source_lateral, source_reason = lateral(source_pairs, source_click)
+    target_lateral, target_reason = lateral(target_pairs, target_click)
+    if source_reason is not None or target_reason is not None:
+        return reject(source_reason or target_reason)
+    source_axes = _independent_axis_count(source_lateral)
+    target_axes = _independent_axis_count(target_lateral)
+    if source_axes > 2 or target_axes > 2:
+        return reject("more than two independent lateral axes were measured")
+    if source_axes >= 2 and target_axes >= 2:
+        return reject("both sides already have complete topology-local frames")
+    if source_axes < 2 and target_axes < 2:
+        return reject("neither side supplies a trustworthy two-axis frame")
+    if any(pair['anchor_side'] for pair in source_lateral + target_lateral):
+        return reject("a surviving wall anchor makes face-to-face recovery unsafe")
+
+    def independent_frame(pairs):
+        frame = []
+        for pair in pairs:
+            if not any(
+                abs(float(pair['axis'] @ kept['axis'])) >= _FIT_COS_5
+                for kept in frame
+            ):
+                frame.append(pair)
+                if len(frame) == 2:
+                    break
+        return frame
+
+    if source_axes >= 2:
+        if any(pair['anchor_side'] for pair in target_pairs):
+            return reject("the missing target side still contains an anchored wall")
+        return 'target', independent_frame(source_lateral), target_lateral
+    if any(pair['anchor_side'] for pair in source_pairs):
+        return reject("the missing source side still contains an anchored wall")
+    return 'source', independent_frame(target_lateral), source_lateral
+
+
+def _recover_spatial_connector_frame(
+        mesh_data, anchor, click_normal, known_pairs, known_click_normal,
+        missing_side):
+    """Recover one bounded, measured two-axis frame across a topology break."""
+    provider = mesh_data.get('region_provider')
+    if provider is not None and not provider.full:
+        raise LockKeyRegionTooSmall(provider)
+
+    anchor = np.array(anchor, dtype=np.float64)
+    click_normal = np.array(click_normal, dtype=np.float64)
+    normal_length = float(np.linalg.norm(click_normal))
+    if normal_length <= 1e-12 or not np.isfinite(click_normal).all():
+        return [], "spatial recovery refused: the disconnected click has no finite plane normal"
+    click_normal /= normal_length
+    known_click_normal = np.array(known_click_normal, dtype=np.float64)
+    known_normal_length = float(np.linalg.norm(known_click_normal))
+    if known_normal_length <= 1e-12 or not np.isfinite(known_click_normal).all():
+        return [], "spatial recovery refused: the known connector has no finite end-face normal"
+    known_click_normal /= known_normal_length
+
+    known = []
+    for pair in known_pairs:
+        if not any(
+            abs(float(pair['axis'] @ kept['axis'])) >= _FIT_COS_5
+            for kept in known
+        ):
+            known.append(pair)
+    if len(known) < 2:
+        return [], "spatial recovery refused: the known connector has fewer than two independent axes"
+    known = known[:2]
+    if any(
+        abs(float(pair['axis'] @ known_click_normal))
+        > math.sin(math.radians(10.0))
+        for pair in known
+    ):
+        return [], "spatial recovery refused: the known walls do not form an end-face frame"
+    known_roles = {_pair_is_female(pair) for pair in known}
+    if len(known_roles) != 1:
+        return [], "spatial recovery refused: the known connector has inconsistent wall roles"
+    axial_direction = 1.0 if not next(iter(known_roles)) else -1.0
+    widths = np.array([float(pair['width']) for pair in known])
+    extents = np.array([
+        float(patch['extent'])
+        for pair in known for patch in (pair['low_patch'], pair['high_patch'])
+    ])
+    areas = np.array([
+        float(patch['area'])
+        for pair in known for patch in (pair['low_patch'], pair['high_patch'])
+    ])
+    if (
+        not np.isfinite(widths).all() or not np.isfinite(extents).all()
+        or not np.isfinite(areas).all() or np.any(widths <= 0.0)
+        or np.any(extents <= 0.0) or np.any(areas <= 0.0)
+    ):
+        return [], "spatial recovery refused: the known connector dimensions are invalid"
+
+    fit_tolerance = max(float(pair['fit_tolerance']) for pair in known)
+    lateral_reach = 0.625 * float(np.linalg.norm(widths)) + fit_tolerance
+    axial_reach = float(max(extents.max(), widths.max())) + fit_tolerance
+    extent_ceiling = 2.0 * float(max(extents.max(), widths.max()))
+    area_ceiling = 4.0 * float(areas.max())
+
+    basis_u = np.cross(click_normal, (1.0, 0.0, 0.0))
+    if float(np.linalg.norm(basis_u)) <= 1e-8:
+        basis_u = np.cross(click_normal, (0.0, 1.0, 0.0))
+    basis_u /= np.linalg.norm(basis_u)
+    basis_v = np.cross(click_normal, basis_u)
+
+    loop_totals = mesh_data['loop_totals'].astype(np.int64)
+    polygon_indices = np.nonzero(loop_totals > 0)[0]
+    if not len(polygon_indices):
+        return [], "spatial recovery found no polygons on the disconnected side"
+    counts = loop_totals[polygon_indices]
+    slots = _csr_ranges(mesh_data['loop_starts'][polygon_indices], counts)
+    coordinates = mesh_data['vertices'][mesh_data['loop_vertices'][slots]] - anchor
+    starts = np.concatenate(([0], np.cumsum(counts)[:-1])).astype(np.int64)
+    projected_u = coordinates @ basis_u
+    projected_v = coordinates @ basis_v
+    projected_z = coordinates @ click_normal
+    u_min = np.minimum.reduceat(projected_u, starts)
+    u_max = np.maximum.reduceat(projected_u, starts)
+    v_min = np.minimum.reduceat(projected_v, starts)
+    v_max = np.maximum.reduceat(projected_v, starts)
+    z_min = np.minimum.reduceat(projected_z, starts)
+    z_max = np.maximum.reduceat(projected_z, starts)
+    nearest_u = np.maximum(np.maximum(u_min, -u_max), 0.0)
+    nearest_v = np.maximum(np.maximum(v_min, -v_max), 0.0)
+    intersects_lateral = np.hypot(nearest_u, nearest_v) <= lateral_reach
+    side_min, side_max = (
+        (z_min, z_max) if axial_direction > 0.0 else (-z_max, -z_min)
+    )
+    intersects_axial = (
+        (side_max >= -fit_tolerance) & (side_min <= axial_reach)
+    )
+    normals = mesh_data['polygon_normals'][polygon_indices]
+    wall_like = np.abs(normals @ click_normal) <= math.sin(math.radians(15.0))
+    raw_extent = np.sqrt(
+        (u_max - u_min) ** 2 + (v_max - v_min) ** 2 + (z_max - z_min) ** 2
+    )
+    candidate_indices = polygon_indices[
+        intersects_lateral & intersects_axial & wall_like
+        & np.isfinite(raw_extent) & (raw_extent <= extent_ceiling)
+    ]
+    if not len(candidate_indices):
+        return [], "spatial recovery found no bounded planar wall candidates"
+
+    candidate_areas = _polygon_areas(mesh_data, candidate_indices)
+    candidate_indices = candidate_indices[
+        (candidate_areas > 0.0) & (candidate_areas <= area_ceiling)
+    ]
+
+    def patch_interval(patch, axis):
+        polygon_indices = np.fromiter(
+            patch['polygons'], dtype=np.int64, count=len(patch['polygons'])
+        )
+        slots = _csr_ranges(
+            mesh_data['loop_starts'][polygon_indices],
+            mesh_data['loop_totals'][polygon_indices],
+        )
+        coordinates = mesh_data['vertices'][mesh_data['loop_vertices'][slots]]
+        projection = coordinates @ axis
+        return float(projection.min()), float(projection.max())
+
+    patches = {}
+    for polygon_index in candidate_indices:
+        patch = _grow_planar_patch(mesh_data, int(polygon_index))
+        if patch is None:
+            continue
+        if (
+            float(patch['extent']) > extent_ceiling
+            or float(patch['area']) > area_ceiling
+            or abs(float(patch['normal'] @ click_normal))
+            > math.sin(math.radians(15.0))
+        ):
+            continue
+        patches[patch['id']] = patch
+
+    groups = []
+    for patch in sorted(patches.values(), key=lambda item: -float(item['area'])):
+        matched = None
+        for group in groups:
+            reference = group[0]
+            tolerance = max(
+                float(patch['tolerance']),
+                *(float(member['tolerance']) for member in group),
+            )
+            if (
+                float(reference['normal'] @ patch['normal']) < _FIT_COS_5
+                or abs(float(reference['normal'] @ (patch['point'] - reference['point'])))
+                > tolerance
+            ):
+                continue
+            tangent = np.cross(click_normal, reference['normal'])
+            tangent_length = float(np.linalg.norm(tangent))
+            if tangent_length <= 1e-12:
+                continue
+            tangent /= tangent_length
+
+            def touches(member):
+                member_tangent = patch_interval(member, tangent)
+                patch_tangent = patch_interval(patch, tangent)
+                member_axial = patch_interval(member, click_normal)
+                patch_axial = patch_interval(patch, click_normal)
+                return (
+                    member_tangent[0] <= patch_tangent[1] + tolerance
+                    and patch_tangent[0] <= member_tangent[1] + tolerance
+                    and member_axial[0] <= patch_axial[1] + tolerance
+                    and patch_axial[0] <= member_axial[1] + tolerance
+                )
+
+            if any(touches(member) for member in group):
+                matched = group
+                break
+        if matched is None:
+            groups.append([patch])
+        else:
+            matched.append(patch)
+
+    patches = []
+    for group in groups:
+        patches.extend(_merge_coplanar_patches(group))
+    patches = [
+        patch for patch in patches
+        if float(patch['extent']) <= extent_ceiling
+        and float(patch['area']) <= area_ceiling
+    ]
+    recovered = [
+        pair for pair in _connector_side_pairs(patches, anchor)
+        if abs(float(pair['axis'] @ click_normal))
+        <= math.sin(math.radians(10.0))
+        and any(
+            _rotation_compatible(pair, other)
+            if missing_side == 'source'
+            else _rotation_compatible(other, pair)
+            for other in known
+        )
+    ]
+    if len(recovered) > _ROTATION_MAX_PAIRS:
+        return [], (
+            f"spatial recovery refused {len(recovered)} opposed wall pairs;"
+            f" the safe limit is {_ROTATION_MAX_PAIRS}"
+        )
+
+    def coherent_frame(first, second):
+        frame_patches = (
+            first['low_patch'], first['high_patch'],
+            second['low_patch'], second['high_patch'],
+        )
+        tolerance = max(
+            fit_tolerance, *(float(patch['tolerance']) for patch in frame_patches)
+        )
+        axial = [patch_interval(patch, click_normal) for patch in frame_patches]
+        if max(low for low, _high in axial) > min(high for _low, high in axial) + tolerance:
+            return False
+
+        def spans(pair, other):
+            positions = [
+                float(other['axis'] @ other['low_patch']['point']),
+                float(other['axis'] @ other['high_patch']['point']),
+            ]
+            required_low, required_high = min(positions), max(positions)
+            for patch in (pair['low_patch'], pair['high_patch']):
+                low, high = patch_interval(patch, other['axis'])
+                if required_low < low - tolerance or required_high > high + tolerance:
+                    return False
+            return True
+
+        return spans(first, second) and spans(second, first)
+
+    frames = {}
+    for first, second in itertools.combinations(recovered, 2):
+        if abs(float(first['axis'] @ second['axis'])) >= _FIT_COS_5:
+            continue
+        if not coherent_frame(first, second):
+            continue
+        mappings = (
+            _rotation_compatible(first, known[0])
+            and _rotation_compatible(second, known[1])
+            if missing_side == 'source' else
+            _rotation_compatible(known[0], first)
+            and _rotation_compatible(known[1], second)
+        ) or (
+            _rotation_compatible(first, known[1])
+            and _rotation_compatible(second, known[0])
+            if missing_side == 'source' else
+            _rotation_compatible(known[1], first)
+            and _rotation_compatible(known[0], second)
+        )
+        if not mappings:
+            continue
+        rows = np.array([first['axis'], second['axis']], dtype=np.float64)
+        values = np.array([
+            float(first['axis'] @ (first['center'] - anchor)),
+            float(second['axis'] @ (second['center'] - anchor)),
+        ])
+        try:
+            center_offset = np.linalg.lstsq(rows, values, rcond=0.1)[0]
+        except np.linalg.LinAlgError:
+            continue
+        center_tolerance = 0.25 * float(widths.min()) + fit_tolerance
+        if (
+            not np.isfinite(center_offset).all()
+            or float(np.linalg.norm(center_offset)) > center_tolerance
+        ):
+            continue
+        inferred_center = anchor + center_offset
+        if any(
+            float(np.max(np.abs(rows @ (
+                0.5 * (pair['low_patch']['point'] + pair['high_patch']['point'])
+                - inferred_center
+            )))) > center_tolerance
+            for pair in (first, second)
+        ):
+            continue
+        frame_key = frozenset((first['low_patch']['id'], first['high_patch']['id'],
+                               second['low_patch']['id'], second['high_patch']['id']))
+        frames[frame_key] = [first, second]
+    if not frames:
+        return [], (
+            f"spatial recovery found {len(patches)} bounded wall patch(es) and"
+            f" {len(recovered)} compatible pair(s), but no coherent two-axis frame"
+        )
+    if len(frames) != 1:
+        return [], f"spatial recovery found {len(frames)} distinct compatible frames"
+    frame = next(iter(frames.values()))
+    if (
+        abs(known[0]['width'] - known[1]['width'])
+        > known[0]['fit_tolerance'] + known[1]['fit_tolerance']
+        and abs(frame[0]['width'] - frame[1]['width'])
+        > frame[0]['fit_tolerance'] + frame[1]['fit_tolerance']
+    ):
+        for rank, pair in enumerate(sorted(known, key=lambda item: item['width'])):
+            pair['_spatial_axis_rank'] = rank
+        for rank, pair in enumerate(sorted(frame, key=lambda item: item['width'])):
+            pair['_spatial_axis_rank'] = rank
+    return frame, None
 
 
 def _rotation_candidates(
@@ -2906,24 +3291,63 @@ def compute_lock_key_transform(
     allow_mixed_anchor = target_normal is not None
     explained = 0 if diagnostics is None else len(diagnostics)
 
-    def _click_normal(mesh_data, face_index, raycast_normal):
-        normal = _clicked_face_normal(mesh_data, face_index)
+    def _click_normal(patch_normal, raycast_normal):
+        normal = patch_normal
         if normal is None and raycast_normal is not None:
             normal = np.array(raycast_normal, dtype=np.float64)
             length = float(np.linalg.norm(normal))
             normal = normal / length if length > 1e-12 else None
         return normal
 
-    source_click = _click_normal(source_data, source_face_index, source_normal)
-    target_click = _click_normal(target_data, target_face_index, target_normal)
+    source_patch_click = _clicked_face_normal(source_data, source_face_index)
+    target_patch_click = _clicked_face_normal(target_data, target_face_index)
+    source_click = _click_normal(source_patch_click, source_normal)
+    target_click = _click_normal(target_patch_click, target_normal)
     click_normals = (
         (source_click, target_click)
         if source_click is not None and target_click is not None else None
     )
+    recovery_click_normals = (
+        (source_patch_click, target_patch_click)
+        if source_patch_click is not None and target_patch_click is not None
+        else None
+    )
+    recovery_reasons = []
+    if recovery_click_normals is None:
+        recovery_reasons.append(
+            "spatial recovery ineligible: exact planar clicked patches are unavailable"
+        )
+        recovery = None
+    else:
+        recovery = _spatial_recovery_eligibility(
+            source_pairs, target_pairs, source_patch_click, target_patch_click,
+            recovery_reasons,
+        )
+    if recovery is not None:
+        missing_side, known_pairs, _missing_pairs = recovery
+        if missing_side == 'source':
+            recovered, reason = _recover_spatial_connector_frame(
+                source_data, source_anchor, source_patch_click, known_pairs,
+                target_patch_click, missing_side,
+            )
+            source_pairs = recovered
+            target_pairs = known_pairs
+        else:
+            recovered, reason = _recover_spatial_connector_frame(
+                target_data, target_anchor, target_patch_click, known_pairs,
+                source_patch_click, missing_side,
+            )
+            source_pairs = known_pairs
+            target_pairs = recovered
+        if not recovered:
+            _note_lock_key_skip(diagnostics, reason)
+            return None
     candidates = _rotation_candidates(
         source_pairs, target_pairs, allow_mixed_anchor=allow_mixed_anchor,
         diagnostics=diagnostics, click_normals=click_normals,
     )
+    if not candidates and recovery_reasons:
+        _note_lock_key_skip(diagnostics, recovery_reasons[-1])
     # Which gate discarded each candidate. A refusal that cannot say is the
     # bug class this log exists to prevent: an empty enumeration spent weeks
     # in the field misreported as "penetrating the lock".
@@ -3107,9 +3531,6 @@ def get_target_free(origin, camera_position, camera_vector, snapping, obj=None, 
         else:
             offset_vector = Vector((0, 0, 1))
 
-        if abs(camera_vector.normalized().dot(offset_vector)) == 1:
-            return origin
-
         point2 = origin + world_matrix @ offset_vector
         result = mathutils.geometry.intersect_line_line(camera_position, camera_point_b, origin, point2)
         if result is None:
@@ -3119,20 +3540,14 @@ def get_target_free(origin, camera_position, camera_vector, snapping, obj=None, 
     # Planar constraint
     if len(snapping) == 2:
         if snapping == 'XY':
-            axis_vector = Vector((0, 0, 1))
             point2 = origin + world_matrix @ Vector((1000, 0, 0))
             point3 = origin + world_matrix @ Vector((0, 1000, 0))
         elif snapping == 'YZ':
-            axis_vector = Vector((1, 0, 0))
             point2 = origin + world_matrix @ Vector((0, 1000, 0))
             point3 = origin + world_matrix @ Vector((0, 0, 1000))
         else:
-            axis_vector = Vector((0, 1, 0))
             point2 = origin + world_matrix @ Vector((1000, 0, 0))
             point3 = origin + world_matrix @ Vector((0, 0, 1000))
-
-        if is_ortho and camera_vector.normalized().dot(axis_vector) != 1:
-            return origin
 
         normal = mathutils.geometry.normal(origin, point2, point3)
         new_target = mathutils.geometry.intersect_line_plane(camera_position, camera_point_b, origin, normal, False)

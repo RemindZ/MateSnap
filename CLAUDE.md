@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-MateSnap is a Blender addon (legacy `bl_info` style, **not** an extension `blender_manifest.toml`), supporting Blender 2.93+. This repo is the **High-Poly fork** of [JulienHeijmans/quicksnap](https://github.com/JulienHeijmans/quicksnap): upstream's snapping behaviour plus optimizations for dense scenes and figurine-kit assembly features (post-snap precision fit, Lock and key).
+MateSnap is a Blender addon (legacy `bl_info` style, **not** an extension `blender_manifest.toml`), supporting Blender 5.0+. This repo is the **High-Poly fork** of [JulienHeijmans/quicksnap](https://github.com/JulienHeijmans/quicksnap): upstream's snapping behaviour plus optimizations for dense scenes and figurine-kit assembly features (post-snap precision fit, Lock and key).
 
 ## Commands
 
@@ -30,7 +30,7 @@ There is no linter, formatter, type-checker, or CI in this repo. `python -m py_c
 - **`quicksnap.py`** — `QuickVertexSnapOperator`, a modal operator, plus preferences, pie menu, and N-panel. All interaction state lives on the operator instance and is reset in `__init__`, `initialize`, and `terminate`. The modal has two entirely separate loops: the standard drag/two-click snap, and `modal_lock_key` for Lock and key mode.
 - **`quicksnap_snapdata.py`** — `SnapData` ingests candidate points (verts / midpoints / face centers / origins) and answers nearest-point queries. It processes **progressively across modal iterations** (`process_iteration`, `keep_processing`) so a dense scene doesn't stall the first frame. Above `heavy_mesh_threshold` it skips the KDTree entirely and queries screen coords with numpy — the KDTree build itself is the stall being avoided.
 - **`quicksnap_utils.py`** — geometry solvers, pure of operator state. Both fitting pipelines live here (below).
-- **`quicksnap_render.py`** — viewport draw callbacks. Imports shaders from `quicksnap_shader_gpu_module` (Blender ≥ 3.4) or `quicksnap_shader_legacy` (older, uses `bgl`); keep any shader change in both.
+- **`quicksnap_render.py`** — viewport draw callbacks. Imports Blender 5 GPU shaders from `quicksnap_shader_gpu_module`.
 - **`addon_updater*.py`** — vendored CGCookie updater. Treat as third-party; don't refactor.
 
 ### The two fitting pipelines are deliberately separate

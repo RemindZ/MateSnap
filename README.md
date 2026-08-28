@@ -8,8 +8,8 @@ completed snaps with a **precision fit**, and stays responsive on
 multi-million-polygon parts.
 
 MateSnap continues [QuickSnap by Julien Heijmans](https://github.com/JulienHeijmans/quicksnap)
-(MIT). The presentation video below is from QuickSnap — the base snapping
-workflow is unchanged:
+(MIT). The presentation video below demonstrates the inherited core snapping
+interaction; MateSnap adds its own defaults and post-snap assembly behavior:
 
 https://user-images.githubusercontent.com/35562774/195340412-6931d8f0-045d-4c4d-badd-96b94ef7f1cc.mp4
 
@@ -49,7 +49,8 @@ learn about the latest updates.
     ![pie-menu](https://user-images.githubusercontent.com/35562774/196196537-82078f77-70ab-4929-a36a-6aaf6fe3bfde.gif)
 
 * Optional vertex auto-merge after a snap in Edit mode.
-* Constrain the translation to an axis or plane with (Shift+)X, Y, Z.
+* Constrain the translation with **X/Y/Z** for an axis or
+  **Shift+X/Shift+Y/Shift+Z** for a plane.
 * Automatic wireframe display of the object you snap onto, target
   highlighting, snapping to hidden points, orthographic and local view
   support.
@@ -58,19 +59,20 @@ learn about the latest updates.
 
 * **Lock and key** — mate two parts with two clicks: one on the moving key's
   connector, one inside the stationary lock. The solver measures the
-  connector walls and applies one safe, atomic transform. It centres sloppy
-  picks on their walls (the preview dot slides to the point it will actually
-  use), forgives clicks on a connector's chamfer, and can rotate the key to
+  connector walls and applies one consistent transform to the selected roots.
+  It centres sloppy picks on their walls (the preview dot slides to the point
+  it will actually use), forgives clicks on a connector's chamfer, and can rotate the key to
   match the lock (toggle with **R** during the pick, or in the settings).
   When a mate cannot be computed safely it refuses with a reason and prints a
   full geometric report to the console — it never guesses.
-* **Precision fit** — after a normal snap, opposed connector walls are
-  detected and the part is centred within its designed clearance, including
-  drafted (tapered) connectors as found on printed parts.
-* **Built for dense meshes** — extraction is region-based around your click
-  and cached across mates, so multi-million-polygon figure parts stay
-  interactive. The first contact with a dense part pays a one-time cost of
-  about a second; anything slower names its stage in the console.
+* **Precision fit** — after an unconstrained Object-mode snap between geometry
+  points, midpoints, or face centres, opposed connector walls are detected and
+  the part is centred within its designed clearance, including drafted
+  (tapered) connectors as found on printed parts. Origin snaps and Edit mode do
+  not run this refinement.
+* **Built for dense meshes** — Lock and key starts with click-local extraction
+  and widens to full coverage when needed, while standard snapping processes
+  dense data progressively to keep the viewport responsive.
 
 ### Updates
 
@@ -82,15 +84,15 @@ learn about the latest updates.
 
 1. Download `MateSnap-<version>.zip` from the
    [Release Page](https://github.com/RemindZ/MateSnap/releases).
-2. In Blender, go to **Edit > Preferences > Add-ons**, click **Install...**
-   in the top-right, and pick the downloaded archive.
+2. In Blender, go to **Edit > Preferences > Add-ons**, open the menu in the
+   top-right, choose **Install from Disk**, and pick the downloaded archive.
 3. Enable MateSnap.
 
-### Migrating from QuickSnap
+### Migrating from QuickSnap-High-Poly
 
-MateSnap includes all of QuickSnap's snapping features. Disable or uninstall
-QuickSnap first — both use **Ctrl+Shift+V** by default, so running both
-creates a hotkey conflict. MateSnap keeps its own preferences, so revisit the
+MateSnap includes all of QuickSnap-High-Poly's snapping features. Disable or
+uninstall QuickSnap-High-Poly first — both use **Ctrl+Shift+V** by default, so
+running both creates a hotkey conflict. MateSnap keeps its own preferences, so
 add-on settings once after installing.
 
 ## Hotkey and settings
@@ -103,7 +105,9 @@ add-on settings once after installing.
 
 ## Using the tool
 
-* Select the object (or vertices/edges/faces/curve points) you want to move.
+* In Object mode, selecting an object first is optional: with no selection,
+  MateSnap can pick the object under the mouse. In Edit mode, select the
+  vertices/edges/faces/curve points you want to move.
 * Enable the tool (**Ctrl+Shift+V**).
 * Pick the snap type by hotkey (1/2/3/O) or through the pie menu.
 * Snap by click-and-drag, or with two clicks (FROM, then TO).
@@ -117,18 +121,21 @@ add-on settings once after installing.
   the matching connector on the stationary part. The mate applies instantly.
 * **R** toggles "Rotate key to match lock" during the pick; **Backspace**
   un-picks the key; right-click or ESC cancels.
-* Click connector walls rather than large flat faces — the preview dot shows
-  the anchor the mate will use. If a mate is refused, the status bar states
-  why and the console holds the full report.
+* For automatic rotation, the natural gesture is the centered end face of the
+  peg followed by the centered floor of the socket. The floor may be a separate
+  mesh island from its side walls. Click matching side walls instead when you
+  need to disambiguate a connector with several genuinely different seatings.
+  The preview dot shows the anchor the mate will use. If a mate is refused, the
+  status bar states why and the console holds the full report.
 
 ## Performance notes
 
 Unlike the original QuickSnap, MateSnap is built for very dense scenes:
 snapping data is processed progressively, heavy meshes skip index structures
-that would stall the viewport, and Lock and key extracts only a region around
-your click. If anything takes longer than a quarter second, MateSnap prints
-which stage and how long to the console — include those lines in any
-performance report.
+that would stall the viewport, and Lock and key starts with a click-local
+region before widening to full coverage when necessary. Instrumented Lock and
+key stages print their timings to the console when they exceed their warning
+thresholds; include those lines in performance reports.
 
 ## Updating the add-on
 
@@ -141,11 +148,10 @@ performance report.
 * First make sure you are on the latest version (see above).
 * Open an issue at https://github.com/RemindZ/MateSnap/issues with what you
   did, what you expected, and what happened.
-* For Lock and key refusals or wrong mates, paste the Blender console output
-  and attach `matesnap_lock_key_log.txt` (saved next to your .blend, or in
-  the temp folder for unsaved files). **Never send your model files** — kit
-  models are usually private, and MateSnap's diagnostics are designed to make
-  the failure understandable without them.
+* For Lock and key refusals or wrong mates, paste the Blender console output.
+  **Never send your model files** — kit models are usually private, and
+  MateSnap's diagnostics are designed to make the failure understandable
+  without them.
 
 ## Known issues / limitations
 
@@ -157,7 +163,7 @@ performance report.
 
 ## Version support
 
-* Blender 2.93 and newer.
+* Blender 5.0 and newer.
 
 ## Credits and license
 

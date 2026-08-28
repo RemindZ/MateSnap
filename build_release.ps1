@@ -30,7 +30,6 @@ $runtimeFiles = @(
     'quicksnap.py',
     'quicksnap_render.py',
     'quicksnap_shader_gpu_module.py',
-    'quicksnap_shader_legacy.py',
     'quicksnap_snapdata.py',
     'quicksnap_utils.py'
 )

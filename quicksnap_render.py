@@ -13,10 +13,7 @@ from mathutils import Vector
 
 from .quicksnap_utils import State
 from .quicksnap_utils import dump
-if bpy.app.version >= (3, 4, 0):
-    from .quicksnap_shader_gpu_module import shader_2d_image_color, shader_2d_uniform_color, shader_3d_uniform_color, shader_3d_smooth_color, shader_3d_polyline_smooth_color, draw_line_3d_smooth_blend_versionized, draw_polygon_smooth_blend_versionized
-else:
-    from .quicksnap_shader_legacy import shader_2d_image_color, shader_2d_uniform_color, shader_3d_uniform_color, shader_3d_smooth_color, shader_3d_polyline_smooth_color, draw_line_3d_smooth_blend_versionized, draw_polygon_smooth_blend_versionized
+from .quicksnap_shader_gpu_module import shader_2d_image_color, shader_2d_uniform_color, shader_3d_uniform_color, shader_3d_smooth_color, shader_3d_polyline_smooth_color, draw_line_3d_smooth_blend_versionized, draw_polygon_smooth_blend_versionized
 
 __name_addon__ = '.'.join(__name__.split('.')[:-1])
 logger = logging.getLogger(__name_addon__)
@@ -452,11 +449,7 @@ def index_allowed(allowed_indices, value):
 
 
 def _blf_size(font_id, size):
-    """blf.size dropped its dpi argument in Blender 4.0."""
-    if bpy.app.version >= (4, 0, 0):
-        blf.size(font_id, size)
-    else:
-        blf.size(font_id, size, 72)
+    blf.size(font_id, size)
 
 
 def draw_perf_hud(self, context):
@@ -898,6 +891,23 @@ def add_camera_offset(co, camera_position, camera_vector, is_ortho):
         return co + cam_point_vector * 0.01
 
 
+def _grouped_index_ranges(group_ids, group_count):
+    order = np.argsort(group_ids, kind="stable")
+    ranges = np.empty(group_count + 1, dtype=np.intp)
+    ranges[0] = 0
+    np.cumsum(np.bincount(group_ids, minlength=group_count), out=ranges[1:])
+    return order, ranges
+
+
+def _vertex_edge_ranges(edge_verts, vertex_count):
+    endpoint_order, ranges = _grouped_index_ranges(edge_verts.ravel(), vertex_count)
+    return endpoint_order // 2, ranges
+
+
+def _polygon_triangle_ranges(triangle_polygons, polygon_count):
+    return _grouped_index_ranges(triangle_polygons, polygon_count)
+
+
 def draw_edge_highlight(context,
                         target_object,
                         target_id,
@@ -931,6 +941,8 @@ def draw_edge_highlight(context,
                 data = vert_object.evaluated_get(context.evaluated_depsgraph_get()).data
 
             if snapdata.snap_type == 'POINTS':
+                if len(data.vertices) <= vert_index:
+                    return
                 if target_object not in npdata:
                     npdata[target_object] = {}
                 if "edge_verts" not in npdata[target_object]:
@@ -938,19 +950,22 @@ def draw_edge_highlight(context,
                     data.edges.foreach_get('vertices', arr)
                     arr.shape = (len(data.edges), 2)
                     npdata[target_object]["edge_verts"] = arr
+                    edge_indices, vertex_ranges = _vertex_edge_ranges(arr, len(data.vertices))
+                    npdata[target_object]["vertex_edge_indices"] = edge_indices
+                    npdata[target_object]["vertex_edge_ranges"] = vertex_ranges
 
-                filter_left = npdata[target_object]["edge_verts"][
-                    npdata[target_object]["edge_verts"][:, 0] == vert_index]
-                filter_right = npdata[target_object]["edge_verts"][
-                    npdata[target_object]["edge_verts"][:, 1] == vert_index]
+                edge_verts = npdata[target_object]["edge_verts"]
+                vertex_ranges = npdata[target_object]["vertex_edge_ranges"]
+                start, end = vertex_ranges[vert_index:vert_index + 2]
+                incident_edges = npdata[target_object]["vertex_edge_indices"][start:end]
                 highlight_data[target_object][vert_index] = {}
                 highlight_data[target_object][vert_index]["edges"] = []
-                for match in filter_left:
-                    highlight_data[target_object][vert_index]["edges"].append((matrix @ data.vertices[match[0]].co,
-                                                                               matrix @ data.vertices[match[1]].co))
-                for match in filter_right:
-                    highlight_data[target_object][vert_index]["edges"].append((matrix @ data.vertices[match[1]].co,
-                                                                               matrix @ data.vertices[match[0]].co))
+                for edge_index in incident_edges:
+                    match = edge_verts[edge_index]
+                    other_index = match[1] if match[0] == vert_index else match[0]
+                    highlight_data[target_object][vert_index]["edges"].append(
+                        (matrix @ data.vertices[vert_index].co,
+                         matrix @ data.vertices[other_index].co))
             elif snapdata.snap_type == 'MIDPOINTS':
                 verts = data.vertices
                 edges = data.edges
@@ -973,6 +988,9 @@ def draw_edge_highlight(context,
                     arr = np.zeros(len(data.loop_triangles), dtype=int)
                     data.loop_triangles.foreach_get('polygon_index', arr)
                     npdata[target_object]["polygon_loop_tri_idx"] = arr
+                    triangle_indices, polygon_ranges = _polygon_triangle_ranges(arr, len(data.polygons))
+                    npdata[target_object]["polygon_triangle_indices"] = triangle_indices
+                    npdata[target_object]["polygon_triangle_ranges"] = polygon_ranges
                     arr2 = np.zeros(len(data.loop_triangles) * 3, dtype=int)
                     data.loop_triangles.foreach_get('vertices', arr2)
                     arr2.shape = (len(data.loop_triangles), 3)
@@ -1022,9 +1040,11 @@ def draw_edge_highlight(context,
                     highlight_data[target_object][vert_index]["edges"].append(
                         (verts_co[vert_index_a], verts_co[vert_index_b]))
 
-                filtered = np.argwhere(npdata[target_object]["polygon_loop_tri_idx"] == vert_index)
-                for triangle_index in filtered:
-                    triangle = npdata[target_object]["polygon_loop_verts"][triangle_index].flatten()
+                triangle_ranges = npdata[target_object]["polygon_triangle_ranges"]
+                start, end = triangle_ranges[vert_index:vert_index + 2]
+                triangle_indices = npdata[target_object]["polygon_triangle_indices"][start:end]
+                for triangle_index in triangle_indices:
+                    triangle = npdata[target_object]["polygon_loop_verts"][triangle_index]
                     highlight_data[target_object][vert_index]["face_indices"].extend(
                         [[vert_local_index[vertid] for vertid in triangle]])
 

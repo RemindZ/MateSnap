@@ -75,6 +75,18 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         if not self.object_mode and not quicksnap_utils.has_points_selected(self.selection_objects):
             self.no_selection = True
 
+        self.lock_key_active = bool(
+            getattr(self.settings, "lock_and_key_mode", False)
+        )
+        if self.lock_key_active and not self.can_initialize_lock_key(
+            self.object_mode, self.no_selection
+        ):
+            self.report(
+                {'WARNING'},
+                "Lock and key requires a selected key in Object mode",
+            )
+            return False
+
         # Hide objects to ignore if we are in local view.
         if context.space_data.local_view is not None:
             all_scene_objects = [obj for obj in context.view_layer.objects if not obj.hide_get()]
@@ -83,16 +95,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             for obj in ignored_objs:
                 obj.hide_set(True)
 
-        self.lock_key_active = bool(
-            getattr(self.settings, "lock_and_key_mode", False)
-        )
         if self.lock_key_active:
-            if not self.object_mode or self.no_selection:
-                self.report(
-                    {'WARNING'},
-                    "Lock and key requires a selected key in Object mode",
-                )
-                return False
             return self.initialize_lock_key(context, region)
 
         # Create SnapData objects that will store all the vertex/point info (World space, view space, and kdtree to
@@ -110,10 +113,14 @@ class QuickVertexSnapOperator(bpy.types.Operator):
 
         # Store 3DView camera information.
         region3d = context.space_data.region_3d
-        self.camera_position = region3d.view_matrix.inverted().translation
-        self.mouse_vector = view3d_utils.region_2d_to_vector_3d(region, context.space_data.region_3d,
+        (
+            self.camera_position,
+            self.view_distance,
+            self.view_camera_zoom,
+            self.perspective_matrix,
+        ) = self.capture_view_state(region3d)
+        self.mouse_vector = view3d_utils.region_2d_to_vector_3d(region, region3d,
                                                                 self.mouse_position)
-        self.perspective_matrix = context.space_data.region_3d.perspective_matrix
         self.perspective_matrix_inverse = self.perspective_matrix.inverted()
         self.target_bounds = {}
         self.target_npdata = {}
@@ -145,10 +152,35 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         self.detect_hotkey()
         return True
 
+    @staticmethod
+    def can_initialize_lock_key(object_mode, no_selection):
+        return bool(object_mode) and not no_selection
+
+    @staticmethod
+    def capture_view_state(region3d):
+        return (
+            region3d.view_matrix.inverted().translation,
+            region3d.view_distance,
+            region3d.view_camera_zoom,
+            region3d.perspective_matrix.copy(),
+        )
+
+    @staticmethod
+    def geometry_settings_changed(settings, ignore_modifiers, source_type, target_type):
+        return (
+            settings.ignore_modifiers != ignore_modifiers
+            or settings.snap_source_type != source_type
+            or settings.snap_target_type != target_type
+        )
+
     def initialize_lock_key(self, context, region):
         region3d = context.space_data.region_3d
-        self.camera_position = region3d.view_matrix.inverted().translation
-        self.perspective_matrix = region3d.perspective_matrix.copy()
+        (
+            self.camera_position,
+            self.view_distance,
+            self.view_camera_zoom,
+            self.perspective_matrix,
+        ) = self.capture_view_state(region3d)
         self.perspective_matrix_inverse = self.perspective_matrix.inverted()
         self.target_object_display_backup = {}
         self.local_wire_objects = set()
@@ -1466,7 +1498,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
 
     def can_enter_lock_key_mode(self):
         """Preflight exactly what initialize() would refuse Lock and key for."""
-        return bool(self.object_mode) and not self.no_selection
+        return self.can_initialize_lock_key(self.object_mode, self.no_selection)
 
     def switch_lock_key_mode(self, context):
         # Preflight before teardown. initialize() destroys the live SnapData, so
@@ -1728,8 +1760,7 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             self.set_object_display(self.target_object, self.hover_object, self.target_object_is_root, force=True)
         elif event_type == 'M':
             self.settings.ignore_modifiers = not self.settings.ignore_modifiers
-
-            self.refresh_vertex_data(context, region)
+            self.handle_pie_menu_closed(context, event, region)
             self.set_object_display(self.target_object, self.hover_object, self.target_object_is_root, force=True)
         elif event_type == 'TAB' and event.shift and event.ctrl:
             loglevel = logger.level
@@ -1768,7 +1799,43 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             context.view_layer.objects.active = context.selected_objects[0]
         return context.active_object is not None
 
+    def cleanup_modal_resources(self, context):
+        error = None
+        try:
+            quicksnap_render.remove_draw_handlers()
+        except Exception as exc:
+            error = exc
+        try:
+            if self.snapdata_target is not None:
+                self.snapdata_target.is_enabled = False
+        except Exception as exc:
+            if error is None:
+                error = exc
+        if self._timer is not None:
+            try:
+                context.window_manager.event_timer_remove(self._timer)
+            except Exception as exc:
+                if error is None:
+                    error = exc
+            else:
+                self._timer = None
+        if error is not None:
+            raise error
+
     def terminate(self, context, revert=False):
+        try:
+            self._restore_scene(context, revert)
+        finally:
+            try:
+                bmeshs = getattr(self, "bmeshs", None)
+                if bmeshs is not None:
+                    while bmeshs:
+                        _, bm = bmeshs.popitem()
+                        bm.free()
+            finally:
+                self.cleanup_modal_resources(context)
+
+    def _restore_scene(self, context, revert=False):
         """
         End modal operator, reset header, etc
         """
@@ -1790,10 +1857,6 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             if context.active_object is not None:
                 bpy.ops.object.mode_set(mode='EDIT')
             bpy.context.window.cursor_set("CROSSHAIR")
-        quicksnap_render.remove_draw_handlers()
-        if self.snapdata_target is not None:
-            self.snapdata_target.is_enabled = False
-        context.window_manager.event_timer_remove(self._timer)
 
         # Revert mode and selection
         if self.object_mode and self.ensure_active_object(context):
@@ -1905,21 +1968,27 @@ class QuickVertexSnapOperator(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def handle_pie_menu_closed(self, context, event, region):
+        source_type = self.snapdata_source.snap_type
+        target_type = self.snapdata_target.snap_type
+        geometry_changed = self.geometry_settings_changed(
+            self.settings, self.ignore_modifiers, source_type, target_type
+        )
         if self.ignore_modifiers != self.settings.ignore_modifiers:
             # Evaluated/raw mesh choice changed: wire caches and heavy gating are stale.
             self.local_wire_data = {}
             self._heavy_cache = {}
             self._corner_cache = {}
-        if self.settings.snap_source_type != self.snapdata_source.snap_type or \
-                self.ignore_modifiers != self.settings.ignore_modifiers:
-            self.init_snap_data(context, region, True, False)
-            if self.current_state == State.IDLE:
-                self.icon_display_time = time.time()
-        if self.settings.snap_target_type != self.snapdata_target.snap_type or \
-                self.ignore_modifiers != self.settings.ignore_modifiers:
-            self.init_snap_data(context, region, False, True)
-            if self.current_state == State.SOURCE_PICKED:
-                self.icon_display_time = time.time()
+        if geometry_changed:
+            if self.settings.snap_source_type != source_type or \
+                    self.ignore_modifiers != self.settings.ignore_modifiers:
+                self.init_snap_data(context, region, True, False)
+                if self.current_state == State.IDLE:
+                    self.icon_display_time = time.time()
+            if self.settings.snap_target_type != target_type or \
+                    self.ignore_modifiers != self.settings.ignore_modifiers:
+                self.init_snap_data(context, region, False, True)
+                if self.current_state == State.SOURCE_PICKED:
+                    self.icon_display_time = time.time()
         self.ignore_modifiers = self.settings.ignore_modifiers
         self.update(context,region)
         pass
