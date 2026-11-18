@@ -7,6 +7,80 @@ mates connector pairs with a two-click **Lock and key** workflow, refines
 completed snaps with a **precision fit**, and stays responsive on
 multi-million-polygon parts.
 
+## What's new compared to QuickSnap
+
+Everything QuickSnap does still works the same way. MateSnap adds:
+
+### Lock and key: two-click connector mating
+
+* **Click the key, click the lock, done.** Click a connector on the part you
+  want to move, then the matching connector on the part it plugs into. MateSnap
+  measures both connectors and seats the key in one step. There is no dragging,
+  and a single undo takes the mate back.
+* **Handles the connectors kits actually use:** square and rectangular pegs,
+  slots, tapered pegs, round pegs, and D-shaped or oval pegs (flat on one side,
+  round on the other). It copes with sculpt-dense meshes, rounded edges,
+  chamfered socket mouths, and sockets whose floor is a separate piece of mesh.
+* **Corrects rough clicks.** Each click is moved to the centre of the wall it
+  landed on, and the preview dot shows the exact point the mate will use.
+  You can switch this off with **Centre picks on the wall**.
+* **Can rotate the key into place.** With **Rotate key to match lock** on
+  (press **R** while picking to toggle it), the key is turned to fit the socket.
+  The easiest way to use it is to click the end of the peg, then the floor of
+  the socket. When a square peg would fit several ways round, MateSnap checks
+  the surrounding geometry and throws out any rotation that would push the part
+  into its neighbour. If several rotations are still possible, it keeps the one
+  closest to how you placed the part.
+* **Round pegs slide straight in.** Click the end of a round peg and the floor
+  of its hole: the peg is centred and pushed in without being spun. If rotation
+  is on, the peg is first tilted the shortest way so it lines up with the hole.
+  Its spin around its own axis stays as you placed it.
+* **Never guesses.** If a mate is unclear or would push the key into the lock's
+  material, nothing moves. The status bar says why and what to try instead.
+  The full measurements behind the decision go to the console and to
+  `matesnap_lock_key_log.txt`, saved next to your .blend file.
+
+### Precision fit after a normal snap
+
+* After an ordinary Object-mode snap between vertices, edge midpoints or face
+  centres, MateSnap looks for the matching flat walls of a connector and
+  centres the part inside the gap the designer left. It also works on tapered
+  connectors. It only slides the part sideways — how deep it sits stays where
+  you snapped it — and it does nothing if it finds no clean connector walls.
+
+### Built for very dense meshes
+
+* Snapping stays smooth on parts with millions of polygons. Snap points load in
+  the background over a few frames, and heavy meshes skip the lookup structures
+  that would freeze the viewport.
+* Dense objects show their wireframe only around the cursor, not across the
+  whole mesh. You can set the radius, colour, opacity and see-through mode, and
+  choose the size at which this kicks in.
+* Lock and key reads only the area around your click on a dense part and
+  remembers what it has read for the next mate.
+
+### Easier picking
+
+* **Prefer corners:** corners of pegs and sockets are easier to grab than
+  points on flat areas around them.
+* **Hide dragged objects over the target:** the parts you are moving disappear
+  while the mouse is over the target, so you can see what you are snapping to.
+* **Pause snapping with Shift or by orbiting:** hold Shift or the middle mouse
+  button to look around the target without snapping to anything.
+* **N-panel toggles:** a MateSnap tab in the 3D view sidebar holds the
+  everyday switches — Lock and key, rotation, centring, precision fit, prefer
+  corners and hide dragged objects.
+
+### Other changes
+
+* Requires **Blender 5.0 or newer**; the old pre-3.4 drawing code is gone.
+* Updates come from this project's own
+  [Release Page](https://github.com/RemindZ/MateSnap/releases).
+
+The full history is in [CHANGELOG.md](CHANGELOG.md).
+
+## About
+
 MateSnap continues [QuickSnap by Julien Heijmans](https://github.com/JulienHeijmans/quicksnap)
 (MIT). The presentation video below demonstrates the inherited core snapping
 interaction; MateSnap adds its own defaults and post-snap assembly behavior:
@@ -63,8 +137,10 @@ learn about the latest updates.
   It centres sloppy picks on their walls (the preview dot slides to the point
   it will actually use), forgives clicks on a connector's chamfer, and can rotate the key to
   match the lock (toggle with **R** during the pick, or in the settings).
-  When a mate cannot be computed safely it refuses with a reason and prints a
-  full geometric report to the console — it never guesses.
+  Flat-sided, tapered, round and D-shaped pegs are supported. When a mate
+  cannot be computed safely it refuses with a reason, and writes a full
+  geometric report to the console and to `matesnap_lock_key_log.txt` — it
+  never guesses.
 * **Precision fit** — after an unconstrained Object-mode snap between geometry
   points, midpoints, or face centres, opposed connector walls are detected and
   the part is centred within its designed clearance, including drafted
@@ -125,8 +201,15 @@ add-on settings once after installing.
   peg followed by the centered floor of the socket. The floor may be a separate
   mesh island from its side walls. Click matching side walls instead when you
   need to disambiguate a connector with several genuinely different seatings.
-  The preview dot shows the anchor the mate will use. If a mate is refused, the
-  status bar states why and the console holds the full report.
+  The preview dot shows the anchor the mate will use.
+* **Round and D-shaped pegs:** click the flat end of the peg and the flat floor
+  of its hole. The peg slides in centred and keeps the spin you gave it, so
+  turn it roughly the right way round first. With rotation on, a tilted peg is
+  first lined up with the hole; with rotation off, the end of the peg and the
+  floor must already be within 5° of each other.
+* If a mate is refused, the status bar states why. The full report goes to the
+  console and is added to `matesnap_lock_key_log.txt`, next to the .blend file
+  (or in Blender's temp folder for an unsaved file).
 
 ## Performance notes
 
@@ -148,7 +231,9 @@ thresholds; include those lines in performance reports.
 * First make sure you are on the latest version (see above).
 * Open an issue at https://github.com/RemindZ/MateSnap/issues with what you
   did, what you expected, and what happened.
-* For Lock and key refusals or wrong mates, paste the Blender console output.
+* For Lock and key refusals or wrong mates, paste the matching entries from
+  `matesnap_lock_key_log.txt` (next to your .blend) or the Blender console
+  output.
   **Never send your model files** — kit models are usually private, and
   MateSnap's diagnostics are designed to make the failure understandable
   without them.
@@ -158,8 +243,13 @@ thresholds; include those lines in performance reports.
 * Target highlighting does not work with 'Ignore modifiers' enabled.
 * In Edit mode the tool always uses the original points of the mesh (without
   modifiers).
-* Lock and key supports flat-sided connectors; rounded connectors are
-  refused by design rather than guessed at.
+* Lock and key mates a round peg only from clicks on its flat end and the
+  hole's flat floor; clicking its curved side is refused. A round peg's spin
+  about its own axis comes from how you placed it, so turn a peg with a
+  matching shape (a D-peg, or a post with a slanted tip) roughly into place
+  first.
+* Organic contact surfaces, or connectors that fit several genuinely different
+  ways, are refused rather than guessed at.
 
 ## Version support
 
