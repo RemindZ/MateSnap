@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.3.1
+
+### Fixed
+- **Rounded connectors are squared up when rotation is on.** Clicking the flat end of a round peg and the floor of its hole used to refuse whenever the key was not already lying within 5 degrees of the socket -- a saber lying 97 degrees off its hand's socket refused although "Rotate key to match lock" was on. With rotation on, the key is now turned by the smallest rotation that lays its end face flat on the floor, then slid in; its spin about its own axis is kept as you placed it, and a spin that buries the key in the lock is still refused with the depth. With rotation off, the 5-degree rule stands and the refusal now says to turn rotation on.
+- **Pegs with one flat and one rounded side seat by their end faces.** A peg-end + socket-floor click on a D-shaped or oval connector refused "spatial recovery ineligible: the local wall axes are ambiguous". When the walls around both clicked faces are facets of a curve, the end-face seating above now takes the mate.
+- **A tilted key is no longer slid into its socket crooked.** End-face clicks on a key tilted up to 25 degrees about one of its wall pairs could be "mated" by sliding alone, leaving the key as tilted as it stood and cutting through the lock -- the side walls that were matched say nothing about a tilt about their own axis. A slide now requires the two clicked faces to rest against each other within 10 degrees, as the rotation path already did; otherwise rotation turns the key into line, or with rotation off the refusal names the angle. This was in every release up to 2.2.1.
+
+## 2.3.0
+
+### Added
+- **Round pegs seat in round holes.** Click the flat end of a round peg and the flat floor of its hole, and Lock and key slides the peg in, centred on the hole, without rotating it -- your placement keeps its orientation, whatever the rotation setting. This used to refuse with "rounded connectors are not supported". It fails closed: the two faces must already lie within 5 degrees of flat against each other, and a peg that would end up inside the lock's material -- too fat for the hole, or turned the wrong way about a leaning post -- is refused with how deep it would sit against the allowance.
+
+### Fixed
+- **Square pegs no longer refuse as ambiguous just because the scene sits far from the world origin.** Lock and key decides whether a peg's four spins seat the walls identically by comparing where each spin leaves the mated walls. It compared the wall planes' offsets from the world origin, so the few hundredths of a degree by which a sculpt's walls always differ were multiplied by the parts' distance from the origin. A kit parked ~330 units out refused peg-tip + socket-floor clicks with "several rotations fit differently" every time, while the same parts mated at the origin. The planes are now compared at the walls themselves.
+- **Rotation refusals carry their numbers.** "Several rotations fit differently" now lists the seatings' angles and how far apart they leave a mated wall against its tolerance. "No rotation seats the key" names the closest uncentred seating's failing check with its values, such as the anchor shift against the relocation cap. When the centred picks and the exact-click retry both refuse, the refusal log records both reasons instead of only the retry's.
+
 ## 2.2.1
 
 ### Fixed

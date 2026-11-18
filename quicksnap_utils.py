@@ -1430,10 +1430,11 @@ def _connector_pairs(mesh_data, seeds, anchor, label='key'):
                 # numbers would be a confident wrong answer.
                 if fraction > 0.0:
                     return [], (
-                        f"the {label} click is on a curved surface -- the wall you"
+                        f"the {label} {_CURVED_CLICK_MARK} -- the wall you"
                         f" clicked is faced by {clicked_pairs} others, where a"
-                        " flat-sided connector's wall faces one or a few, and"
-                        " rounded connectors are not supported"
+                        " flat-sided connector's wall faces one or a few; a"
+                        " rounded connector is seated only by its flat end and"
+                        " the floor of its hole"
                     )
                 break
             # The trimmed pass pairs only substantial walls, so whatever it found is
@@ -1582,7 +1583,8 @@ def _describe_missing_wall_pair(mesh_data, seeds, anchor, searched, label='key')
             f"flat growth failed on {len(curves)} curved region(s) beside the"
             f" click, the biggest {rounded['faces']} faces spanning"
             f" {rounded['extent']:.4g} -- if that curve is the connector, it is"
-            " rounded, and rounded connectors are not supported"
+            " rounded, and a rounded connector is seated only by clicking its"
+            " flat end and the floor of its hole"
         )
     return ", ".join(parts)
 
@@ -2544,7 +2546,8 @@ def _connector_placement_signature(matches, translation):
     identically -- that is what makes a symmetric connector's alternative solutions
     interchangeable, and it is the only case where the design allows preferring the
     smaller rotation. Each plane carries the tolerance it was measured at, because
-    "identically" is judged by _equivalent_seatings at that tolerance.
+    "identically" is judged by _equivalent_seatings at that tolerance, and a point
+    on the wall itself, because that is where the two planes have to agree.
     """
     planes = []
     for match in matches:
@@ -2552,10 +2555,8 @@ def _connector_placement_signature(matches, translation):
         for name in ('low_patch', 'high_patch'):
             patch = source[name]
             normal = np.array(patch['normal'], dtype=np.float64)
-            point = patch['point'] + translation
-            planes.append((
-                normal, float(normal @ point), float(match['tolerance']),
-            ))
+            point = np.array(patch['point'], dtype=np.float64) + translation
+            planes.append((normal, point, float(match['tolerance'])))
     return planes
 
 
@@ -2571,18 +2572,81 @@ def _equivalent_seatings(first, second):
     counterpart within tolerance are indistinguishable at the precision the
     solver claims; a plane with no counterpart is a genuinely different
     seating and stays ambiguous.
-    """
-    def covered(planes, others):
-        for normal, offset, tolerance in planes:
-            if not any(
-                float(normal @ other_normal) >= _FIT_COS_5
-                and abs(offset - other_offset) <= max(tolerance, other_tolerance)
-                for other_normal, other_offset, other_tolerance in others
-            ):
-                return False
-        return True
 
-    return covered(first, second) and covered(second, first)
+    The separation is measured at the walls, never as a difference of plane
+    offsets from the world origin: two spins' wall normals always differ by a
+    few hundredths of a degree on a sculpt, and an origin offset multiplies that
+    by the part's distance from the origin -- a kit parked 300 units out
+    refused as ambiguous the very spins it accepted at the origin.
+    """
+    separation, tolerance = _seating_mismatch(first, second)
+    return separation <= tolerance
+
+
+def _seating_mismatch(first, second):
+    """The worst-matched wall plane between two seatings, as (separation, tolerance).
+
+    Each plane is paired with its best counterpart in the other seating; the
+    plane whose best counterpart overshoots its tolerance the most is reported.
+    Separation is infinite for a plane with no counterpart within five degrees.
+    Kept apart from the yes/no test so an ambiguity refusal can say how far
+    apart the seatings actually were -- a near-miss and a genuinely different
+    seating call for different fixes.
+    """
+    worst = (0.0, 0.0)
+    for planes, others in ((first, second), (second, first)):
+        for normal, point, tolerance in planes:
+            best = None
+            for other_normal, other_point, other_tolerance in others:
+                if float(normal @ other_normal) < _FIT_COS_5:
+                    continue
+                separation = max(
+                    abs(float(normal @ (other_point - point))),
+                    abs(float(other_normal @ (point - other_point))),
+                )
+                allowed = max(tolerance, other_tolerance)
+                if best is None or separation - allowed < best[0] - best[1]:
+                    best = (separation, allowed)
+            if best is None:
+                return math.inf, tolerance
+            if best[0] - best[1] > worst[0] - worst[1]:
+                worst = best
+    return worst
+
+
+def _centring_miss(matches, source_hit, target_hit):
+    """How the full-set centring of one candidate fails, as (excess, text).
+
+    The same checks _validate_lock_key_transform makes, reporting the one that
+    overshoots most, so a rotation refusal can say which gate -- gap
+    imbalance, interpenetration or the anchor relocation cap -- and by how much.
+    """
+    translation = _solve_lock_key_translation(matches, source_hit, target_hit)
+    if translation is None:
+        return math.inf, "its wall pairs give no solvable centring"
+    worst = None
+    for match in matches:
+        low_gap, high_gap = _connector_gaps(match, translation)
+        tolerance = match['tolerance']
+        correction = translation - (
+            match['target']['anchor'] - match['source']['anchor']
+        )
+        along = abs(float(match['axis'] @ correction))
+        cap = 0.25 * match['source']['width'] + tolerance
+        for excess, text in (
+            (-min(low_gap, high_gap) - tolerance,
+             f"walls interpenetrate (gaps {low_gap:+.4f}/{high_gap:+.4f},"
+             f" tolerance {tolerance:.4f})"),
+            (abs(low_gap - high_gap) - tolerance,
+             f"gaps cannot be balanced ({low_gap:+.4f}/{high_gap:+.4f},"
+             f" tolerance {tolerance:.4f})"),
+            (along - cap,
+             f"centring moves the anchors {along:.4f} apart against a cap"
+             f" of {cap:.4f}"),
+        ):
+            if worst is None or excess > worst[0]:
+                worst = (excess, text)
+    return worst
 
 
 # Surroundings survey: how far around each click the parts are compared, as a
@@ -3040,7 +3104,8 @@ def _clicked_wall_is_not_a_connector(mesh_data, seeds, anchor, label, pairs=()):
             f". Beside it, flat growth failed on {len(curves)} curved region(s),"
             f" the biggest {rounded['faces']} faces spanning"
             f" {rounded['extent']:.4g} -- if that curve is the connector, it is"
-            " rounded, and rounded connectors are not supported"
+            " rounded, and a rounded connector is seated only by clicking its"
+            " flat end and the floor of its hole"
         )
     return (
         f"the {label} click is on a large flat face rather than a connector -- the"
@@ -3060,6 +3125,262 @@ def _note_lock_key_skip(diagnostics, message):
         diagnostics.append(message)
 
 
+# The curved-surface refusal is the evidence that admits the round fallback, so
+# the phrase is shared rather than retyped where it is tested.
+_CURVED_CLICK_MARK = "click is on a curved surface"
+# With rotation off a round connector is seated by sliding alone, so the
+# clicked end faces must already lie nearly parallel.
+_ROUND_MAX_TILT_DEGREES = 5.0
+_ROUND_SURVEY_EXTENTS = 2.0
+_ROUND_MAX_SAMPLES = 1024
+_ROUND_MAX_OBSTACLES = 400000
+# A socket floor is walled in: of the directions across it, just above it,
+# nearly all meet the socket's walls. A face on the outside of a part meets
+# nothing that way, and two such faces laid together are not a mate.
+_ROUND_ENCLOSURE_RAYS = 8
+_ROUND_MIN_ENCLOSED = 6
+
+
+def _socket_enclosure(mesh_data, patch):
+    """How many directions across a clicked face meet its own part's walls.
+
+    Rays leave a point a tenth of the face's radius above its centre, in
+    `_ROUND_ENCLOSURE_RAYS` directions in the face's plane, and count when they
+    hit the part within twice the face's extent. The floor of a hole scores
+    them all; the flat end of a peg, or any face on a part's outside, none.
+    A floor also looks out of its hole's mouth: a face whose own normal meets
+    the part within that reach is a hole's side wall, walled in across its
+    plane just as a floor is, and scores none.
+    """
+    centre = np.array(patch['point'], dtype=np.float64)
+    normal = np.array(patch['normal'], dtype=np.float64)
+    reach = _ROUND_SURVEY_EXTENTS * float(patch['extent'])
+    lift = 0.1 * math.sqrt(max(float(patch['area']), 0.0) / math.pi)
+    ids = _survey_ring(mesh_data, centre, 1.5 * reach, _ROUND_MAX_OBSTACLES)
+    tree = _survey_obstacle_tree(mesh_data, ids) if len(ids) else None
+    if tree is None:
+        return 0
+    side = np.cross(
+        normal, (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0)
+    )
+    side /= np.linalg.norm(side)
+    other = np.cross(normal, side)
+    origin = Vector(tuple(float(value) for value in centre + lift * normal))
+    if tree.ray_cast(
+        origin, Vector(tuple(float(value) for value in normal)), reach
+    )[0] is not None:
+        return 0
+    enclosed = 0
+    for step in range(_ROUND_ENCLOSURE_RAYS):
+        angle = 2.0 * math.pi * step / _ROUND_ENCLOSURE_RAYS
+        direction = math.cos(angle) * side + math.sin(angle) * other
+        hit = tree.ray_cast(
+            origin, Vector(tuple(float(value) for value in direction)), reach
+        )
+        if hit[0] is not None:
+            enclosed += 1
+    return enclosed
+
+
+def _round_seating_overlap(
+        source_data, target_data, source_centre, target_centre,
+        rotation, radius, normal):
+    """Deepest key sample buried in the lock once seated.
+
+    The seating turns the key by `rotation` (3x3) about its end face's centre
+    and carries that centre onto the lock's.
+
+    Samples are spread over the key within `radius` of its end face rather
+    than taken nearest-first: what can be wrong with a slid-in round peg is
+    its body against the socket wall, not the end face resting on the floor.
+    Containment is a two-of-three parity vote, because the lock's surface is
+    cut out of a larger part and a single ray can leave through that cut.
+    Returns (deepest, buried_count).
+    """
+    sample_ids = _survey_ring(source_data, source_centre, radius, 10 ** 9)
+    obstacle_ids = _survey_ring(
+        target_data, target_centre, 1.5 * radius, _ROUND_MAX_OBSTACLES
+    )
+    if not len(sample_ids) or not len(obstacle_ids):
+        return 0.0, 0
+    if len(sample_ids) > _ROUND_MAX_SAMPLES:
+        sample_ids = np.sort(sample_ids)[
+            np.linspace(0, len(sample_ids) - 1, _ROUND_MAX_SAMPLES).astype(np.int64)
+        ]
+    tree = _survey_obstacle_tree(target_data, obstacle_ids)
+    if tree is None:
+        return 0.0, 0
+    side = np.cross(
+        normal, (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0)
+    )
+    side /= np.linalg.norm(side)
+    rays = [
+        Vector(tuple(float(value) for value in direction)).normalized()
+        for direction in (normal, side, np.cross(normal, side))
+    ]
+    moved = (
+        (source_data['polygon_centers'][sample_ids] - source_centre) @ rotation.T
+        + target_centre
+    )
+    deepest = 0.0
+    buried = 0
+    for point in moved:
+        near = tree.find_nearest(Vector(tuple(float(value) for value in point)), radius)
+        if near[0] is None or near[3] <= 1e-6:
+            continue
+        votes = sum(
+            1 for ray in rays
+            if _survey_point_inside(tree, point, ray, 4.0 * radius)
+        )
+        if votes >= 2:
+            buried += 1
+            deepest = max(deepest, float(near[3]))
+    return deepest, buried
+
+
+def _rounded_end_click(pairs, click_normal):
+    """True when a flat click sits at the end of a connector with curved sides.
+
+    The wall pairs that run across the clicked face's normal are the sides of
+    the connector it ends; when two of them share an axis but disagree on its
+    walls, the sides are facets of a curve, not two flat walls -- the spatial
+    recovery's "local wall axes are ambiguous". Such a click is the flat end of
+    a rounded peg or the floor of a rounded hole.
+    """
+    if click_normal is None:
+        return False
+    normal = np.array(click_normal, dtype=np.float64)
+    length = float(np.linalg.norm(normal))
+    if length <= 1e-12 or not np.isfinite(normal).all():
+        return False
+    normal /= length
+    lateral = [
+        pair for pair in pairs
+        if pair['opening_angle'] >= _ROTATION_MIN_OPENING
+        and abs(float(pair['axis'] @ normal)) <= math.sin(math.radians(10.0))
+    ]
+    return _rotation_axis_ambiguous(lateral)
+
+
+def _round_connector_transform(
+        source_data, target_data, source_face_index, target_face_index,
+        evidence, allow_rotation, diagnostics):
+    """Seat a rounded peg on a rounded socket by its end faces.
+
+    A rounded connector has no flat side walls, so the wall solve can neither
+    centre it nor fix its spin -- and a round peg needs neither from it: the
+    clicked end faces' centroids lie on the peg's and the socket's axes, and
+    carrying one onto the other is the mate. With rotation off the key only
+    slides, so its end face must already lie flat against the floor; with
+    rotation on it is first turned by the smallest rotation that lays the end
+    face flat on the floor, which keeps the user's spin about the axis. The
+    spin is never solved: a peg turned the wrong way about its axis buries its
+    corners -- or, for a post leaning through its end face, its body -- in the
+    socket wall and is refused by the overlap test. The outline is
+    deliberately not judged: a sculpted floor ringed by a fillet strays as far
+    from an ellipse as a square does.
+
+    Admitted only after the wall solve refused, and only when a click was
+    measured as rounded: refused as curved outright, or an end face whose
+    connector sides are facets of a curve. Returns None without a word
+    otherwise, so the wall solve's own reason stands.
+    """
+    source_patch = _grow_planar_patch(source_data, int(source_face_index))
+    target_patch = _grow_planar_patch(target_data, int(target_face_index))
+    rounded = list(evidence.get('curved', ()))
+    for label, pairs, patch in (
+            ('key', evidence.get('source_pairs', ()), source_patch),
+            ('lock', evidence.get('target_pairs', ()), target_patch)):
+        if (
+            label not in rounded and patch is not None
+            and _rounded_end_click(pairs, patch['normal'])
+        ):
+            rounded.append(label)
+    if not rounded:
+        return None
+    rounded.sort(key=('key', 'lock').index)
+    prefix = (
+        f"the {' and '.join(rounded)} click is on a rounded connector and the"
+        " round-connector seating could not be used: "
+    )
+    if source_patch is None or target_patch is None:
+        _note_lock_key_skip(
+            diagnostics, prefix + "a round connector is seated by its flat ends"
+            " -- click the flat end of the peg and the flat floor of the hole")
+        return None
+    # Either half may be the one with the hole, so one of the two clicked
+    # faces must be a walled-in floor; two outside faces only touch.
+    walled = max(
+        _socket_enclosure(target_data, target_patch),
+        _socket_enclosure(source_data, source_patch),
+    )
+    if walled < _ROUND_MIN_ENCLOSED:
+        _note_lock_key_skip(
+            diagnostics, prefix + "neither clicked face is the floor of a hole"
+            f" (at most {walled} of {_ROUND_ENCLOSURE_RAYS} directions across"
+            f" one meet a wall with its mouth open, {_ROUND_MIN_ENCLOSED} needed) -- a round"
+            " connector is seated by the flat end of the peg and the flat floor"
+            " of its hole, not by its curved side")
+        return None
+    source_normal = np.array(source_patch['normal'], dtype=np.float64)
+    target_normal = np.array(target_patch['normal'], dtype=np.float64)
+    tilt = math.degrees(math.acos(
+        max(-1.0, min(1.0, -float(source_normal @ target_normal)))
+    ))
+    if tilt > _ROUND_MAX_TILT_DEGREES and not allow_rotation:
+        _note_lock_key_skip(
+            diagnostics, prefix + f"the key's end face is {tilt:.1f} degrees from"
+            " lying flat against the lock's (at most"
+            f" {_ROUND_MAX_TILT_DEGREES:.0f} allowed with rotation off) -- turn on"
+            " 'Rotate key to match lock', or turn the key roughly into line with"
+            " the socket first")
+        return None
+    if allow_rotation:
+        turn = Vector(tuple(float(v) for v in source_normal)).rotation_difference(
+            Vector(tuple(float(-v) for v in target_normal))
+        ).to_matrix()
+    else:
+        turn = mathutils.Matrix.Identity(3)
+    rotation = np.array(turn, dtype=np.float64)
+    source_centre = np.array(source_patch['point'], dtype=np.float64)
+    target_centre = np.array(target_patch['point'], dtype=np.float64)
+    # The surroundings survey's allowance: a seated peg rubbing its socket's
+    # floor fillet stays inside it (the field signpost: 0.087 against 0.122),
+    # a peg a few percent too fat for its hole does not.
+    allowance = _SURVEY_PENETRATION_FACTOR * max(
+        float(source_patch['tolerance']), float(target_patch['tolerance'])
+    )
+    deepest, buried = _round_seating_overlap(
+        source_data, target_data, source_centre, target_centre, rotation,
+        _ROUND_SURVEY_EXTENTS * float(source_patch['extent']), target_normal,
+    )
+    turned = tilt if allow_rotation else 0.0
+    if deepest > allowance:
+        how = (
+            f"turning the key {turned:.1f} degrees to lay its end face on the"
+            " lock's and sliding it in" if turned > 0.05
+            else "sliding the key's end face onto the lock's"
+        )
+        _note_lock_key_skip(
+            diagnostics, prefix + f"{how} buries the key {deepest:.4f} deep in"
+            f" the lock (allowance {allowance:.4f}, {buried} sample(s) inside)"
+            " -- the two are not the same connector, or the key is turned"
+            " differently about its axis from the socket; spin it roughly into"
+            " place first")
+        return None
+    logger.warning(
+        "Lock and key: rounded connector seated by its end face"
+        f" (turned {turned:.2f} degrees, spin about the axis kept;"
+        f" deepest contact {deepest:.4f} vs allowance {allowance:.4f})")
+    pivot = Vector(tuple(float(v) for v in source_centre))
+    landing = Vector(tuple(float(v) for v in target_centre))
+    return (
+        mathutils.Matrix.Translation(landing)
+        @ turn.to_4x4()
+        @ mathutils.Matrix.Translation(-pivot)
+    )
+
+
 def compute_lock_key_transform(
         context, settings,
         source_object_name, source_face_index, source_hit,
@@ -3072,6 +3393,44 @@ def compute_lock_key_transform(
 
     The caller may hand in already-extracted mesh data; extraction dominates the
     cost on dense meshes and the operator has usually paid for it already.
+
+    Flat-walled connectors are solved from their walls. Only when that solve
+    refuses and a click was measured as rounded does the round-connector
+    seating get a turn -- its refusal then names why, in place of the wall
+    solve's, which cannot speak to a round connector.
+    """
+    evidence = {}
+    delta = _compute_wall_lock_key_transform(
+        context, settings,
+        source_object_name, source_face_index, source_hit,
+        target_object_name, target_face_index, target_hit,
+        allow_rotation=allow_rotation,
+        source_mesh_data=source_mesh_data, target_mesh_data=target_mesh_data,
+        source_normal=source_normal, target_normal=target_normal,
+        diagnostics=diagnostics, allow_promotion=allow_promotion,
+        round_evidence=evidence,
+    )
+    if delta is not None or 'source_data' not in evidence:
+        return delta
+    return _round_connector_transform(
+        evidence['source_data'], evidence['target_data'],
+        source_face_index, target_face_index, evidence, allow_rotation,
+        diagnostics,
+    )
+
+
+def _compute_wall_lock_key_transform(
+        context, settings,
+        source_object_name, source_face_index, source_hit,
+        target_object_name, target_face_index, target_hit,
+        allow_rotation=False,
+        source_mesh_data=None, target_mesh_data=None,
+        source_normal=None, target_normal=None,
+        diagnostics=None, allow_promotion=True, round_evidence=None):
+    """The flat-walled connector solve behind compute_lock_key_transform.
+
+    `round_evidence`, when given, collects what the round-connector fallback
+    needs: the extracted mesh data and which clicks were refused as curved.
     """
     source_obj = bpy.data.objects.get(source_object_name)
     target_obj = bpy.data.objects.get(target_object_name)
@@ -3135,7 +3494,7 @@ def compute_lock_key_transform(
                 for target_at, (target_face, target_point) in enumerate(target_options):
                     if source_at == 0 and target_at == 0:
                         continue
-                    candidate = compute_lock_key_transform(
+                    candidate = _compute_wall_lock_key_transform(
                         context, settings,
                         source_object_name, source_face, source_point,
                         target_object_name, target_face, target_point,
@@ -3170,12 +3529,48 @@ def compute_lock_key_transform(
     target_pairs, target_reason = _connector_pairs(
         target_data, target_seeds, target_anchor, 'lock'
     )
+    if round_evidence is not None:
+        round_evidence['source_data'] = source_data
+        round_evidence['target_data'] = target_data
+        round_evidence['curved'] = [
+            label for label, pairs, reason in (
+                ('key', source_pairs, source_reason),
+                ('lock', target_pairs, target_reason),
+            )
+            if not pairs and reason and _CURVED_CLICK_MARK in reason
+        ]
+        round_evidence['source_pairs'] = source_pairs
+        round_evidence['target_pairs'] = target_pairs
     matches = _match_connector_pairs(source_pairs, target_pairs)
     translation, _used = _centreable_matches(matches, source_anchor, target_anchor)
+    clicks_measured = False
     if translation is not None:
-        return mathutils.Matrix.Translation(
-            Vector(tuple(float(value) for value in translation))
-        )
+        # A translation keeps the key's orientation, so the clicked faces must
+        # already rest against each other -- the rotation path asks the same of
+        # its candidates. Matched pairs pin only the directions across their
+        # own walls: an end-face click on a key tilted about a matched axis
+        # balances every pair and still seats the key crooked through the lock.
+        source_patch_click = _clicked_face_normal(source_data, source_face_index)
+        target_patch_click = _clicked_face_normal(target_data, target_face_index)
+        clicks_measured = True
+        if (
+            source_patch_click is None or target_patch_click is None
+            or float(source_patch_click @ target_patch_click)
+            <= -_CLICK_FACES_OPPOSED_COS
+        ):
+            return mathutils.Matrix.Translation(
+                Vector(tuple(float(value) for value in translation))
+            )
+        apart = math.degrees(math.acos(max(-1.0, min(1.0, -float(
+            source_patch_click @ target_patch_click)))))
+        if not allow_rotation:
+            _note_lock_key_skip(
+                diagnostics,
+                f"the clicked key face is {apart:.1f} degrees from resting"
+                " against the clicked lock face, and sliding alone would seat"
+                " the key that crooked in the lock -- turn on 'Rotate key to"
+                " match lock', or turn the key roughly into line first")
+            return None
     if not allow_rotation:
         # Two clicks whose wall pairs agree on a lateral direction have found the
         # connector, whatever refuses further down: a flat face with nothing facing
@@ -3299,8 +3694,9 @@ def compute_lock_key_transform(
             normal = normal / length if length > 1e-12 else None
         return normal
 
-    source_patch_click = _clicked_face_normal(source_data, source_face_index)
-    target_patch_click = _clicked_face_normal(target_data, target_face_index)
+    if not clicks_measured:
+        source_patch_click = _clicked_face_normal(source_data, source_face_index)
+        target_patch_click = _clicked_face_normal(target_data, target_face_index)
     source_click = _click_normal(source_patch_click, source_normal)
     target_click = _click_normal(target_patch_click, target_normal)
     click_normals = (
@@ -3352,6 +3748,7 @@ def compute_lock_key_transform(
     # bug class this log exists to prevent: an empty enumeration spent weeks
     # in the field misreported as "penetrating the lock".
     killed = {'unmatched': 0, 'uncentred': 0, 'one-axis': 0, 'insertion-guard': 0}
+    nearest_uncentred = None
     for candidate in candidates:
         rotation = candidate['rotation']
         rotated_pairs = _rotate_connector_pairs(source_pairs, rotation)
@@ -3365,6 +3762,9 @@ def compute_lock_key_transform(
         )
         if rotated_translation is None or len(rotated_used) < 2:
             killed['uncentred'] += 1
+            miss = _centring_miss(rotated_matches, rotated_anchor, target_anchor)
+            if nearest_uncentred is None or miss[0] < nearest_uncentred[0]:
+                nearest_uncentred = miss
             continue
         # Rank the axes of the pairs that actually constrained the solve: a
         # rotation held by one balanced axis plus discarded extras is held by
@@ -3429,26 +3829,46 @@ def compute_lock_key_transform(
             autopsy = ", ".join(
                 f"{count} {gate}" for gate, count in killed.items() if count
             )
+            # The counts say which gate; the nearest miss says by how much,
+            # which is what separates a misplaced click from a misfit part.
+            nearest = (
+                "" if nearest_uncentred is None
+                else f"; nearest uncentred seating: {nearest_uncentred[1]}"
+            )
             _note_lock_key_skip(
                 diagnostics,
                 "no rotation seats the key without penetrating the lock"
                 + (f" ({len(candidates)} candidate rotation(s) discarded:"
-                   f" {autopsy})" if autopsy else ""))
+                   f" {autopsy}{nearest})" if autopsy else ""))
         return None
     # Smallest-angle ranking is only legitimate between candidates that seat the
     # mated walls identically within measurement tolerance. Candidates that seat
     # them differently are a genuine ambiguity, and preferring the nearer one
     # would silently pick an orientation the geometry never justified.
     valid.sort(key=lambda item: item[0])
-    if any(
-        not _equivalent_seatings(valid[0][2], item[2]) for item in valid[1:]
-    ):
+    different = [
+        item for item in valid[1:]
+        if not _equivalent_seatings(valid[0][2], item[2])
+    ]
+    if different:
+        # Say how different: a wall a hair past tolerance is a measurement
+        # question, one with no counterpart at all is a genuinely other seating.
+        separation, tolerance = _seating_mismatch(valid[0][2], different[0][2])
+        apart = (
+            "a mated wall with no counterpart within 5 degrees"
+            if math.isinf(separation)
+            else f"a mated wall {separation:.4f} apart against a tolerance of"
+            f" {tolerance:.4f}"
+        )
+        angles = ", ".join(f"{math.degrees(item[0]):.1f}" for item in valid)
         _note_lock_key_skip(
             diagnostics,
             "several rotations fit differently; too ambiguous to choose --"
             " click the key on a side wall of its connector and the lock on"
             " the wall it should rest against, so the clicks decide the"
-            " orientation")
+            f" orientation ({len(valid)} seatings at {angles} degrees; the"
+            f" {math.degrees(valid[0][0]):.1f} and"
+            f" {math.degrees(different[0][0]):.1f} degree ones leave {apart})")
         return None
     if len(valid) > 1 and target_click is not None:
         # The connector cannot tell equivalent seatings apart, but the parts

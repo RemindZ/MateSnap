@@ -56,9 +56,9 @@ def assert_blender_5_metadata():
         raise AssertionError(
             f"expected Blender 5 baseline, got {package.bl_info['blender']!r}"
         )
-    if package.bl_info["version"] != (2, 2, 1):
+    if package.bl_info["version"] != (2, 3, 1):
         raise AssertionError(
-            f"expected MateSnap 2.2.1, got {package.bl_info['version']!r}"
+            f"expected MateSnap 2.3.0, got {package.bl_info['version']!r}"
         )
 
 
@@ -1419,6 +1419,12 @@ def assert_end_face_clicks_align_the_mate():
     if not any("several rotations fit differently" in note for note in diagnostics):
         raise AssertionError(
             f"ambiguous seating refusal is not named: {diagnostics}")
+    if not any(
+        "apart against a tolerance of" in note or "no counterpart" in note
+        for note in diagnostics
+    ):
+        raise AssertionError(
+            f"ambiguous seating refusal does not say how far apart: {diagnostics}")
 
     # ...and wall clicks resolve exactly that ambiguity by naming the mapping.
     key_hit = key.matrix_world @ Vector((-0.45, 0.0, -0.3))
@@ -1429,6 +1435,409 @@ def assert_end_face_clicks_align_the_mate():
     key.matrix_world = delta @ key.matrix_world
     if key.matrix_world.to_quaternion().angle > 1e-5:
         raise AssertionError("wall clicks seated the rectangle the wrong way")
+
+
+def make_round_key_lock(peg_radius=2.0, hole_radius=2.08, segments=256, rings=24):
+    """A dense round peg and a blind round hole: no flat side wall anywhere.
+
+    The peg's tip sits at its origin facing -Z with the body above; the hole's
+    floor is at (0, 0, -3) facing +Z inside a block whose top is at z = 0.
+    Dense facets and rings make the sides read as curved the way a sculpt does,
+    so the wall solve refuses exactly as it did on the field signpost.
+    """
+    import bmesh
+
+    def cylinder(name, radius, depth, lift):
+        mesh = bmesh.new()
+        bmesh.ops.create_cone(
+            mesh, cap_ends=True, segments=segments, radius1=radius,
+            radius2=radius, depth=depth,
+        )
+        bmesh.ops.translate(mesh, verts=mesh.verts, vec=(0.0, 0.0, lift))
+        bmesh.ops.subdivide_edges(
+            mesh,
+            edges=[
+                edge for edge in mesh.edges
+                if abs(edge.verts[0].co.z - edge.verts[1].co.z) > 1.0
+            ],
+            cuts=rings, use_grid_fill=False,
+        )
+        data = bpy.data.meshes.new(name + "Mesh")
+        mesh.to_mesh(data)
+        mesh.free()
+        obj = bpy.data.objects.new(name, data)
+        bpy.context.collection.objects.link(obj)
+        return obj
+
+    key = cylinder("RoundKey", peg_radius, 8.0, 4.0)
+    lock = make_mesh(
+        "RoundLock",
+        [(-6, -6, -6), (6, -6, -6), (6, 6, -6), (-6, 6, -6),
+         (-6, -6, 0), (6, -6, 0), (6, 6, 0), (-6, 6, 0)],
+        [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
+         (2, 3, 7, 6), (3, 0, 4, 7)],
+    )
+    cutter = cylinder("RoundCutter", hole_radius, 4.0, -1.0)
+    modifier = lock.modifiers.new("cut", 'BOOLEAN')
+    modifier.operation = 'DIFFERENCE'
+    modifier.object = cutter
+    bpy.context.view_layer.objects.active = lock
+    bpy.ops.object.modifier_apply(modifier="cut")
+    bpy.data.objects.remove(cutter, do_unlink=True)
+    bpy.context.view_layer.update()
+
+    def end_face(obj, normal):
+        normal = Vector(normal)
+        best = None
+        for polygon in obj.data.polygons:
+            world_normal = (obj.matrix_world.to_3x3() @ polygon.normal).normalized()
+            if world_normal.dot(normal) < 0.999:
+                continue
+            centre = obj.matrix_world @ polygon.center
+            # The clicked end is the one nearest the connector's own axis end.
+            score = abs(centre.z) if normal.z < 0 else abs(centre.z + 3.0)
+            if best is None or score < best[0]:
+                best = (score, polygon.index)
+        return best[1]
+
+    return key, end_face(key, (0, 0, -1)), lock, end_face(lock, (0, 0, 1))
+
+
+def make_d_key_lock(clearance=0.06, segments=48, rings=24):
+    """A D-shaped peg and its blind socket: one flat side, one faceted round side.
+
+    Modelled on the field cloth-back peg (2.3.0): the flat side faces a fan of
+    round-side facets, so the pairs across the clicked end face share an axis
+    but disagree on their walls -- the spatial recovery reads the axes as
+    ambiguous and the wall solve refuses, though nothing is refused as curved.
+    The peg's tip is at its origin facing -Z; the socket's floor is at
+    (0, 0, -3) facing +Z inside a block whose top is at z = 0.
+    """
+    import bmesh
+
+    def prism(name, grow, bottom, top):
+        radius = 2.0 + grow
+        flat = 1.0 + grow
+        outline = [
+            (radius * math.cos(step * math.pi / segments),
+             -radius * math.sin(step * math.pi / segments))
+            for step in range(segments + 1)
+        ] + [(-radius, flat), (radius, flat)]
+        mesh = bmesh.new()
+        low = [mesh.verts.new((x, y, bottom)) for x, y in outline]
+        high = [mesh.verts.new((x, y, top)) for x, y in outline]
+        count = len(outline)
+        for index in range(count):
+            following = (index + 1) % count
+            mesh.faces.new((low[index], low[following], high[following], high[index]))
+        mesh.faces.new(list(reversed(low)))
+        mesh.faces.new(high)
+        bmesh.ops.recalc_face_normals(mesh, faces=mesh.faces)
+        # Rings down the sides, as a sculpt has: the overlap test samples face
+        # centres, and one face spanning the whole side samples nothing.
+        bmesh.ops.subdivide_edges(
+            mesh,
+            edges=[
+                edge for edge in mesh.edges
+                if abs(edge.verts[0].co.z - edge.verts[1].co.z) > 1e-6
+            ],
+            cuts=rings, use_grid_fill=False,
+        )
+        data = bpy.data.meshes.new(name + "Mesh")
+        mesh.to_mesh(data)
+        mesh.free()
+        obj = bpy.data.objects.new(name, data)
+        bpy.context.collection.objects.link(obj)
+        return obj
+
+    key = prism("DKey", 0.0, 0.0, 6.0)
+    lock = make_mesh(
+        "DLock",
+        [(-6, -6, -6), (6, -6, -6), (6, 6, -6), (-6, 6, -6),
+         (-6, -6, 0), (6, -6, 0), (6, 6, 0), (-6, 6, 0)],
+        [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
+         (2, 3, 7, 6), (3, 0, 4, 7)],
+    )
+    cutter = prism("DCutter", clearance, -3.0, 1.0)
+    modifier = lock.modifiers.new("cut", 'BOOLEAN')
+    modifier.operation = 'DIFFERENCE'
+    modifier.object = cutter
+    bpy.context.view_layer.objects.active = lock
+    bpy.ops.object.modifier_apply(modifier="cut")
+    bpy.data.objects.remove(cutter, do_unlink=True)
+    bpy.context.view_layer.update()
+
+    def cap(obj, normal, height):
+        for polygon in obj.data.polygons:
+            if (
+                polygon.normal.dot(Vector(normal)) > 0.999
+                and abs(polygon.center.z - height) < 1e-4
+            ):
+                return polygon.index
+        raise AssertionError(f"no cap facing {normal} at z={height} on {obj.name}")
+
+    return key, cap(key, (0, 0, -1), 0.0), lock, cap(lock, (0, 0, 1), -3.0)
+
+
+def assert_round_connectors_slide_without_rotating():
+    """A round peg in a round hole is seated by sliding, never rotated.
+
+    Field report (2.2.1, Base_Signpost into Base): tip + floor clicks on a
+    round post refused "the key click is on a curved surface ... rounded
+    connectors are not supported", then a recovery-path line nobody could act
+    on. A round peg needs no spin from its walls -- the end faces' centres lie
+    on the peg's and the hole's axes, and sliding one onto the other is the
+    mate, the user's orientation kept as it stands.
+    """
+    settings = SimpleNamespace(ignore_modifiers=False, lock_and_key_centre_picks=True)
+
+    def solve(key, key_face, lock, lock_face, allow_rotation):
+        bpy.context.view_layer.update()
+        tip = key.matrix_world @ key.data.polygons[key_face].center
+        floor = lock.matrix_world @ lock.data.polygons[lock_face].center
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, settings,
+            key.name, key_face, tip, lock.name, lock_face, floor,
+            allow_rotation=allow_rotation,
+            source_normal=key.matrix_world.to_3x3() @ Vector((0.0, 0.0, -1.0)),
+            target_normal=Vector((0.0, 0.0, 1.0)),
+            diagnostics=diagnostics,
+        )
+        return delta, diagnostics
+
+    clear_scene()
+    key, key_face, lock, lock_face = make_round_key_lock()
+    # Parked off to the side and spun about its own axis: the spin must be
+    # kept, because a round peg has none to correct.
+    spin = Matrix.Rotation(math.radians(37.0), 4, 'Z')
+    key.matrix_world = Matrix.Translation((3.0, -2.0, 5.0)) @ spin
+    bpy.context.view_layer.update()
+    walls_only = {}
+    if quicksnap_utils._compute_wall_lock_key_transform(
+        bpy.context, settings, key.name, key_face,
+        key.matrix_world @ key.data.polygons[key_face].center,
+        lock.name, lock_face, Vector((0.0, 0.0, -3.0)), allow_rotation=True,
+        source_normal=Vector((0.0, 0.0, -1.0)), target_normal=Vector((0.0, 0.0, 1.0)),
+        round_evidence=walls_only,
+    ) is not None or 'key' not in walls_only.get('curved', ()):
+        raise AssertionError(
+            "the fixture must reach the round fallback the way the field part"
+            f" did: the wall solve refusing a curved key click ({walls_only.get('curved')!r})"
+        )
+    for allow_rotation in (False, True):
+        delta, diagnostics = solve(key, key_face, lock, lock_face, allow_rotation)
+        if delta is None:
+            raise AssertionError(
+                f"round peg refused (rotation {allow_rotation}): {diagnostics[-1:]!r}"
+            )
+        if max(
+            abs(value) for row in (delta.to_3x3() - Matrix.Identity(3)) for value in row
+        ) > 1e-9:
+            raise AssertionError(f"round peg was rotated: {delta!r}")
+        if (delta.translation - Vector((-3.0, 2.0, -8.0))).length > 1e-3:
+            raise AssertionError(
+                f"round peg not slid onto the floor's centre: {delta.translation!r}"
+            )
+
+    # Tilted past the parallel bar: sliding alone cannot seat it, so with
+    # rotation off say so -- and with rotation on, lay the end face flat on
+    # the floor first (field report 2.3.0: a saber lying 97 degrees off its
+    # hand's socket, refused although rotation was on).
+    tilt = Matrix.Rotation(math.radians(10.0), 4, 'X')
+    key.matrix_world = Matrix.Translation((3.0, -2.0, 5.0)) @ tilt @ spin
+    delta, diagnostics = solve(key, key_face, lock, lock_face, False)
+    if delta is not None or "degrees from lying flat" not in diagnostics[-1]:
+        raise AssertionError(f"tilted round peg must refuse by its tilt: {diagnostics[-1:]!r}")
+    delta, diagnostics = solve(key, key_face, lock, lock_face, True)
+    if delta is None:
+        raise AssertionError(f"tilted round peg refused with rotation on: {diagnostics[-1:]!r}")
+    seated = delta @ key.matrix_world
+    tip = seated @ key.data.polygons[key_face].center
+    facing = seated.to_3x3() @ Vector((0.0, 0.0, -1.0))
+    if facing.angle(Vector((0.0, 0.0, -1.0))) > 1e-6 or (tip - Vector((0.0, 0.0, -3.0))).length > 1e-3:
+        raise AssertionError(
+            f"tilted round peg not laid flat on the floor's centre: tip {tip!r}, facing {facing!r}"
+        )
+    # The smallest turn that squares the end face keeps the user's spin.
+    kept = seated.to_3x3() @ Vector((1.0, 0.0, 0.0))
+    wanted = spin.to_3x3() @ Vector((1.0, 0.0, 0.0))
+    if kept.angle(wanted) > 1e-6:
+        raise AssertionError(f"squaring the round peg changed its spin: {kept!r} vs {wanted!r}")
+
+    # A peg too fat for its hole buries its body in the wall and is refused,
+    # with the depth against the allowance.
+    clear_scene()
+    key, key_face, lock, lock_face = make_round_key_lock(peg_radius=2.3)
+    key.matrix_world = Matrix.Translation((3.0, -2.0, 5.0))
+    delta, diagnostics = solve(key, key_face, lock, lock_face, True)
+    if delta is not None or "buries the key" not in diagnostics[-1]:
+        raise AssertionError(f"oversized round peg must refuse: {diagnostics[-1:]!r}")
+
+
+def assert_rounded_end_faces_seat_square_or_refuse():
+    """End-face clicks on a D-shaped peg: squared when rotation is on, never crooked.
+
+    Field report (2.3.0, a cloth panel's peg into the legs): end face plus
+    socket floor on a peg with one flat and one faceted round side refused
+    "spatial recovery ineligible: the local wall axes are ambiguous". The
+    sides' wall pairs share an axis but disagree on their walls, which is
+    what marks the click as the end of a rounded connector, so the end-face
+    seating takes it. Fixture checks on the same shape found the wall solve's
+    translation path seating a tilted key as it stood -- 25 degrees crooked
+    through a 0.06 clearance socket, released in 2.2.1 -- because the side
+    walls it matched pin nothing about a tilt about their own axis.
+    """
+    settings = SimpleNamespace(ignore_modifiers=False, lock_and_key_centre_picks=True)
+
+    def solve(tilt_degrees, spin_degrees, allow_rotation):
+        clear_scene()
+        key, key_face, lock, lock_face = make_d_key_lock()
+        key.matrix_world = (
+            Matrix.Translation((3.0, -2.0, 5.0))
+            @ Matrix.Rotation(math.radians(tilt_degrees), 4, 'X')
+            @ Matrix.Rotation(math.radians(spin_degrees), 4, 'Z')
+        )
+        bpy.context.view_layer.update()
+        diagnostics = []
+        delta = quicksnap_utils.compute_lock_key_transform(
+            bpy.context, settings,
+            key.name, key_face, key.matrix_world @ key.data.polygons[key_face].center,
+            lock.name, lock_face, Vector((0.0, 0.0, -3.0)),
+            allow_rotation=allow_rotation,
+            source_normal=key.matrix_world.to_3x3() @ Vector((0.0, 0.0, -1.0)),
+            target_normal=Vector((0.0, 0.0, 1.0)),
+            diagnostics=diagnostics,
+        )
+        return key, delta, diagnostics
+
+    # Tilted with the right spin and rotation on: squared onto the floor, the
+    # flat side against the socket's flat side, the outline inside the hole.
+    key, delta, diagnostics = solve(25.0, 0.0, True)
+    if delta is None:
+        raise AssertionError(f"tilted D peg refused with rotation on: {diagnostics[-1:]!r}")
+    seated = delta @ key.matrix_world
+    facing = seated.to_3x3() @ Vector((0.0, 0.0, -1.0))
+    flat = seated.to_3x3() @ Vector((0.0, 1.0, 0.0))
+    if facing.angle(Vector((0.0, 0.0, -1.0))) > 1e-6 or flat.angle(Vector((0.0, 1.0, 0.0))) > 1e-6:
+        raise AssertionError(f"D peg not squared into its socket: facing {facing!r}, flat side {flat!r}")
+    corners = [seated @ vertex.co for vertex in key.data.vertices]
+    if (
+        min(point.z for point in corners) < -3.0 - 1e-4
+        or min(point.y for point in corners) < -2.06 - 1e-3
+        or max(point.y for point in corners) > 1.06 + 1e-3
+        or max(abs(point.x) for point in corners) > 2.06 + 1e-3
+    ):
+        raise AssertionError("seated D peg pokes out of its socket")
+
+    # Turned the wrong way about its axis: buried, refused, depth named.
+    _key, delta, diagnostics = solve(25.0, 180.0, True)
+    if delta is not None or "buries the key" not in diagnostics[-1]:
+        raise AssertionError(f"D peg spun 180 degrees must refuse: {diagnostics[-1:]!r}")
+
+    # Rotation off: no slide may leave the key as crooked as it stands.
+    for spin_degrees in (0.0, 8.0, 90.0):
+        _key, delta, diagnostics = solve(15.0, spin_degrees, False)
+        if delta is not None:
+            raise AssertionError(
+                f"D peg tilted 15 degrees (spin {spin_degrees}) was seated crooked"
+                " with rotation off"
+            )
+        if "degrees from lying flat" not in diagnostics[-1]:
+            raise AssertionError(
+                f"crooked D peg refused without naming its tilt: {diagnostics[-1:]!r}"
+            )
+
+
+def assert_far_from_origin_spins_stay_equivalent():
+    """Seating equivalence is measured at the walls, not from the world origin.
+
+    Field report (2.2.1, Cthulhu kit parked ~330 units out): tip + floor clicks
+    on a square drafted peg refused "several rotations fit differently" for
+    every click, while the identical parts mated at the origin. A sculpt's spins
+    differ in wall normal by hundredths of a degree, and comparing plane
+    offsets from the origin multiplied that by the parts' distance from it.
+    One wall here is drafted 0.2 degrees off its siblings -- sculpt-sized
+    noise -- and the pair must mate the same way at the origin and far out.
+    """
+    def world_normal(obj, face):
+        matrix = obj.matrix_world.to_3x3().inverted().transposed()
+        return (matrix @ obj.data.polygons[face].normal).normalized()
+
+    def drafted_key(half, depth, drafts):
+        slopes = [math.tan(math.radians(draft)) for draft in drafts]
+        x0, x1 = -half + depth * slopes[0], half - depth * slopes[1]
+        y0, y1 = -half + depth * slopes[2], half - depth * slopes[3]
+        return make_mesh(
+            "FarKey",
+            [(x0, y0, -depth), (x1, y0, -depth), (x1, y1, -depth),
+             (x0, y1, -depth), (-half, -half, 0.0), (half, -half, 0.0),
+             (half, half, 0.0), (-half, half, 0.0)],
+            [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5),
+             (2, 3, 7, 6), (3, 0, 4, 7)],
+        )
+
+    def drafted_lock(half, depth, draft):
+        tip = half - depth * math.tan(math.radians(draft))
+        return make_mesh(
+            "FarLock",
+            [(-half, -half, 0.0), (half, -half, 0.0), (half, half, 0.0),
+             (-half, half, 0.0), (-tip, -tip, -depth), (tip, -tip, -depth),
+             (tip, tip, -depth), (-tip, tip, -depth)],
+            [(1, 5, 4, 0), (2, 6, 5, 1), (3, 7, 6, 2), (0, 4, 7, 3),
+             (4, 5, 6, 7)],
+        )
+
+    def solve(key, lock, tip_xy, diagnostics):
+        return quicksnap_utils.compute_lock_key_transform(
+            bpy.context, SimpleNamespace(ignore_modifiers=True),
+            key.name, 0, key.matrix_world @ Vector((*tip_xy, -8.0)),
+            lock.name, 4, lock.matrix_world @ Vector((0.05, 0.1, -7.0)),
+            allow_rotation=True,
+            source_normal=world_normal(key, 0),
+            target_normal=world_normal(lock, 4),
+            diagnostics=diagnostics,
+        )
+
+    seated = []
+    for far in ((0.0, 0.0, 0.0), (-600.0, 400.0, 150.0)):
+        clear_scene()
+        key = drafted_key(1.8, 8.0, (5.92, 5.92, 5.92, 5.72))
+        lock = drafted_lock(2.2, 7.0, 7.2)
+        lock.location = far
+        key.location = (far[0] + 20.0, far[1] - 10.0, far[2])
+        key.rotation_euler = Euler((0.35, -0.25, 0.5), 'XYZ')
+        bpy.context.view_layer.update()
+        diagnostics = []
+        delta = solve(key, lock, (0.03, 0.02), diagnostics)
+        if delta is None:
+            raise AssertionError(
+                f"square peg {far} from the origin refused: {diagnostics}")
+        key.matrix_world = delta @ key.matrix_world
+        seated.append((
+            key.matrix_world.to_quaternion(),
+            key.matrix_world.translation - Vector(far),
+        ))
+    (near_spin, near_offset), (far_spin, far_offset) = seated
+    if near_spin.rotation_difference(far_spin).angle > 1e-4:
+        raise AssertionError("distance from the origin changed the chosen spin")
+    if (near_offset - far_offset).length > 1e-3:
+        raise AssertionError("distance from the origin changed the seating")
+
+    # A tip click far off the peg's axis trips the anchor relocation cap on
+    # every spin. The refusal must name that gate with its numbers, not only
+    # count "uncentred" -- the field log that counted could not say why.
+    key.matrix_world = delta.inverted() @ key.matrix_world
+    bpy.context.view_layer.update()
+    diagnostics = []
+    if solve(key, lock, (0.9, 0.7), diagnostics) is not None:
+        raise AssertionError("a tip click past the relocation cap mated")
+    if not any(
+        "nearest uncentred seating: centring moves the anchors" in note
+        for note in diagnostics
+    ):
+        raise AssertionError(
+            f"uncentred refusal does not name the cap: {diagnostics}")
 
 
 def assert_surroundings_pick_the_spin():
@@ -3352,6 +3761,9 @@ def main():
     assert_smallest_equivalent_rotation()
     assert_rotation_follows_the_clicked_walls()
     assert_end_face_clicks_align_the_mate()
+    assert_far_from_origin_spins_stay_equivalent()
+    assert_round_connectors_slide_without_rotating()
+    assert_rounded_end_faces_seat_square_or_refuse()
     assert_surroundings_pick_the_spin()
     print("optional rotation: PASS")
     assert_modifier_path_is_consistent()

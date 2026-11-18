@@ -7,7 +7,7 @@ bl_info = {
     "name": "MateSnap",
     "author": "RemindZ, based on QuickSnap by Julien Heijmans",
     "blender": (5, 0, 0),
-    'version': (2, 2, 1),
+    'version': (2, 3, 1),
     "category": "3D View",
     "description": "Mate kit and figurine parts with precision snapping",
     "warning": "",

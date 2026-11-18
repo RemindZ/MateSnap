@@ -1107,7 +1107,13 @@ class QuickVertexSnapOperator(bpy.types.Operator):
             attempts.append((raw_source, hit['location']))
         diagnostics = []
         delta = None
+        # Every attempt's reason reaches the refusal log, not just the last: the
+        # exact-click retry refusing for its own reason once hid that the
+        # centred picks had failed on something else entirely.
+        self.lock_key_attempt_reasons = []
         for source_location, target_location in attempts:
+            if diagnostics:
+                self.lock_key_attempt_reasons.append(diagnostics[-1])
             diagnostics = []
             try:
                 delta = quicksnap_utils.compute_lock_key_transform(
@@ -1190,6 +1196,8 @@ class QuickVertexSnapOperator(bpy.types.Operator):
                 f", centre picks: "
                 f"{getattr(self.settings, 'lock_and_key_centre_picks', True)}",
             ]
+            for earlier in getattr(self, 'lock_key_attempt_reasons', ()):
+                lines.append(f"  centred picks refused first: {earlier}")
             # Same-object clicks are a click mistake, not a geometry puzzle:
             # dumping two full wall surveys of one dense part stalls the UI for
             # a report that could only restate the reason line.
